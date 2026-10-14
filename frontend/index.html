@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Study Harness</title>
+<meta name="description" content="A study chatbot with visible steps, interactive charts and a credit wallet.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a7f6f'/%3E%3Cpath d='M9 21l5-10 4 7 2-4 3 7' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<a class="skip" href="#composer-text">Skip to message box</a>
+<div id="app" class="app" data-files="open">
+  <div class="scrim" id="scrim" hidden></div>
+
+  <aside class="sidebar" id="sidebar" aria-label="Sidebar">
+    <div class="side-head">
+      <div class="brand"><span class="logo" aria-hidden="true"></span><span id="brand-name">Study Harness</span></div>
+      <button class="icon-btn only-mobile" id="close-side" aria-label="Close menu">✕</button>
+    </div>
+    <button class="btn primary block" id="new-chat">＋ New chat</button>
+    <nav class="side-section grow" aria-label="Chats">
+      <h2 class="side-title">Chats</h2>
+      <ul class="chat-list" id="chat-list"></ul>
+      <p class="muted small" id="chat-empty">Your chats show up here.</p>
+    </nav>
+    <div class="side-section">
+      <button class="side-link" id="open-profile">🧠 What I remember about you</button>
+      <button class="side-link" id="open-files-btn">📁 My files</button>
+    </div>
+    <div class="wallet" id="wallet" aria-live="polite">
+      <div class="wallet-top"><span class="plan-badge" id="plan-badge">free</span><span class="muted small" id="wallet-held"></span></div>
+      <div class="wallet-bal"><strong id="wallet-bal">–</strong> <span class="muted">credits</span></div>
+      <div class="wallet-dev" id="wallet-dev" hidden>
+        <label class="small muted" for="dev-plan">Test as plan</label>
+        <select id="dev-plan" class="select small"><option>free</option><option>student</option><option>pro</option><option>school</option></select>
+        <button class="btn small" id="dev-topup">+500 credits</button>
+      </div>
+    </div>
+    <div class="side-foot">
+      <button class="side-link" id="theme-toggle" aria-label="Switch light or dark">🌓 Theme</button>
+      <p class="muted tiny" id="sync-note"></p>
+    </div>
+  </aside>
+
+  <main class="main" id="main">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="open-side" aria-label="Open menu">☰</button>
+      <h1 class="topbar-title" id="chat-title">New chat</h1>
+      <div class="topbar-right">
+        <span class="credit-pill" id="credit-pill" title="Credits left">◎ <b id="pill-bal">–</b></span>
+        <button class="btn small files-toggle" id="files-toggle" aria-expanded="true" aria-controls="files-panel">Files <span class="count" id="files-count">0</span></button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" role="status" hidden></div>
+
+    <section class="thread-wrap" id="thread-wrap" aria-label="Conversation">
+      <div class="thread" id="thread" aria-live="off"></div>
+      <button class="to-bottom" id="to-bottom" hidden aria-label="Jump to latest">↓</button>
+    </section>
+
+    <form class="composer" id="composer" autocomplete="off">
+      <div class="chips" id="chips" role="toolbar" aria-label="Choices for this message"></div>
+      <div class="box">
+        <div class="attachments" id="attachments"></div>
+        <textarea id="composer-text" rows="1" maxlength="12000" placeholder="Ask anything. I explain in simple words." aria-label="Message"></textarea>
+        <div class="box-row">
+          <label class="icon-btn" title="Add a file" aria-label="Add a file">📎<input type="file" id="file-input" hidden accept=".txt,.md,.csv,.json,.pdf,.png,.jpg,.jpeg,.docx,.pptx"></label>
+          <div class="estimate" id="estimate" aria-live="polite">Estimate shows here</div>
+          <button type="button" class="btn danger" id="stop-btn" hidden>■ Stop</button>
+          <button type="submit" class="btn primary" id="send-btn" aria-label="Send">Send ↑</button>
+        </div>
+      </div>
+    </form>
+  </main>
+
+  <aside class="files" id="files-panel" aria-label="Files">
+    <div class="files-head">
+      <div><h2 class="side-title" id="ws-name">Workspace</h2><div class="meter" aria-hidden="true"><i id="ws-meter"></i></div><p class="muted tiny" id="ws-usage"></p></div>
+      <button class="icon-btn only-mobile" id="close-files" aria-label="Close files">✕</button>
+    </div>
+    <ul class="file-list" id="file-list"></ul>
+    <p class="muted small" id="files-empty">Files the AI makes land here, with Open and Download.</p>
+    <div class="preview" id="preview" hidden></div>
+    <button class="btn small danger-ghost" id="delete-files">Delete all my files</button>
+  </aside>
+</div>
+
+<div class="sheet" id="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+  <div class="sheet-card">
+    <div class="sheet-head"><h2 id="settings-title">Settings for this message</h2><button class="icon-btn" id="settings-close" aria-label="Close">✕</button></div>
+    <div class="sheet-body" id="settings-body"></div>
+  </div>
+</div>
+<div class="sheet" id="dialog" role="dialog" aria-modal="true" hidden>
+  <div class="sheet-card narrow"><div class="sheet-head"><h2 id="dialog-title"></h2><button class="icon-btn" id="dialog-close" aria-label="Close">✕</button></div><div class="sheet-body" id="dialog-body"></div></div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

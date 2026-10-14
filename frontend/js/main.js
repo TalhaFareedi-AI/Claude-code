@@ -1,0 +1,405 @@
+import { $, $$, h, toast, safeStore, timeAgo } from './dom.js';
+import { api, streamChat, uploadFile, ApiError } from './api.js';
+import { renderMarkdown } from './markdown.js';
+import { ArtifactStore, RunView, messageFooter, nextButtons } from './runview.js';
+import { FilesPanel } from './files.js';
+import { DEFAULTS, buildSettings, currentMode, modeName, modelLabel } from './settings.js';
+
+const store = safeStore();
+const S = { ...DEFAULTS, ...store.get('sh.settings', {}) };          // choices for the next message
+const app = {
+  boot: null, convId: null, running: false, controller: null, taskId: null, lastPayload: null, artifacts: new ArtifactStore(),
+  stick: true, uploads: [], est: null, estSeq: 0, lastAssistantId: null,
+};
+const files = new FilesPanel();
+const thread = $('#thread'), wrap = $('#thread-wrap'), input = $('#composer-text');
+
+const STARTERS = [
+  { t: 'Explain it simply', d: 'How does photosynthesis work? Use an everyday example.' },
+  { t: 'Play with a graph', d: 'Show me how savings grow with a chart and sliders.' },
+  { t: 'Make a deck', d: 'Make a 6 slides PPT on the water cycle.' },
+  { t: 'Quiz me', d: 'Quiz me on adding fractions.' },
+];
+
+// ------------------------------------------------------------------ boot
+async function init() {
+  applyTheme(store.get('sh.theme', null));
+  try {
+    app.boot = await api('/api/bootstrap');
+  } catch (e) {
+    $('#banner').hidden = false; $('#banner').textContent = e.message; return;
+  }
+  const b = app.boot;
+  document.title = b.app; $('#brand-name').textContent = b.app;
+  sanitizeSettings();
+  paintWallet(b.wallet); paintPlan();
+  if (!b.has_key) banner('No OpenRouter key is set on the server. Add OPENROUTER_API_KEY to the .env file and restart.');
+  const sync = b.catalog_sync || {};
+  $('#sync-note').textContent = sync.error ? 'Prices: built-in table (live sync unavailable)' : sync.at ? 'Prices: live from OpenRouter' : 'Prices: built-in table';
+  paintChips(); wireStatic(); scheduleEstimate();
+  await refreshChats();
+  const resume = store.get('sh.run', null);
+  const last = store.get('sh.conv', null);
+  if (resume?.conv) { await openConversation(resume.conv); if (resume.task) resumeRun(resume.task, resume.conv); }
+  else if (last) await openConversation(last);
+  else showWelcome();
+  files.refresh(app.convId);
+  if (matchMedia('(max-width: 1100px)').matches) $('#app').dataset.files = 'closed';
+}
+
+function sanitizeSettings() {
+  // The server is the boss: drop saved choices the current plan or model list no longer allows.
+  const b = app.boot;
+  const mode = b.modes.find((m) => m.id === S.mode);
+  if (S.mode !== 'auto' && (!mode || !mode.allowed)) Object.assign(S, { mode: 'auto', brains: {} });
+  const eff = b.efforts.find((e) => e.id === S.effort);
+  if (!eff || !eff.allowed) S.effort = 'auto';
+  const ids = new Set(b.models.filter((m) => m.allowed).map((m) => m.id));
+  for (const [k, v] of Object.entries(S.brains)) if ([].concat(v).some((x) => x && !ids.has(x))) delete S.brains[k];
+  S.tools = S.tools.filter((t) => b.tools.some((x) => x.id === t));
+}
+
+const persist = () => store.set('sh.settings', S);
+function banner(text) { const el = $('#banner'); el.textContent = text; el.hidden = false; }
+
+// ------------------------------------------------------------------ wallet and plan
+function paintWallet(w) {
+  $('#wallet-bal').textContent = w.available; $('#pill-bal').textContent = w.available;
+  $('#wallet-held').textContent = w.held ? `${w.held} on hold` : '';
+  app.available = w.available;
+}
+function paintPlan() {
+  const b = app.boot;
+  $('#plan-badge').textContent = b.user.plan;
+  $('#wallet-dev').hidden = !b.dev_mode;
+  $('#dev-plan').value = b.user.plan;
+}
+async function refreshWallet() { try { paintWallet(await api('/api/wallet')); } catch { /* shown next time */ } }
+
+// ------------------------------------------------------------------ chat list
+async function refreshChats() {
+  let list = [];
+  try { list = await api('/api/conversations'); } catch { return; }
+  $('#chat-empty').hidden = list.length > 0;
+  $('#chat-list').replaceChildren(...list.map((c) => h('li', { class: 'chat-item' + (c.id === app.convId ? ' active' : '') },
+    h('button', { type: 'button', class: 'open', title: `${c.title} · ${timeAgo(c.updated_at)}`, text: c.title, 'aria-current': c.id === app.convId ? 'true' : null, onclick: () => { closeSide(); openConversation(c.id); } }),
+    h('button', { type: 'button', class: 'del', 'aria-label': `Delete chat ${c.title}`, text: '🗑', onclick: async () => { await api(`/api/conversations/${c.id}`, { method: 'DELETE' }); if (c.id === app.convId) newChat(); refreshChats(); } }))));
+}
+
+function newChat() {
+  if (app.running) return toast('Wait for the current run, or press Stop.');
+  app.convId = null; thread.replaceChildren(); app.artifacts = new ArtifactStore(); app.lastAssistantId = null;
+  $('#chat-title').textContent = 'New chat'; store.set('sh.run', null); store.set('sh.conv', null);
+  showWelcome(); files.refresh(null); refreshChats(); input.focus();
+}
+
+function showWelcome() {
+  thread.replaceChildren(h('div', { class: 'welcome' }, h('h2', { text: 'What do you want to learn today?' }),
+    h('p', { class: 'muted', text: 'I explain in simple words, with examples. Charts have sliders you can move.' }),
+    h('div', { class: 'starters' }, STARTERS.map((s) => h('button', { type: 'button', class: 'starter', onclick: () => send({ message: s.d }) }, h('b', { text: s.t }), h('span', { class: 'muted small', text: s.d }))))));
+}
+
+// ------------------------------------------------------------------ history
+async function openConversation(id) {
+  if (app.running) return toast('Wait for the current run, or press Stop.');
+  let c;
+  try { c = await api(`/api/conversations/${id}`); } catch (e) { store.set('sh.run', null); showWelcome(); return toast(e.message); }
+  app.convId = id; app.artifacts = new ArtifactStore(); store.set('sh.conv', id);
+  $('#chat-title').textContent = c.title;
+  thread.replaceChildren();
+  const lastAssistant = [...c.messages].reverse().find((m) => m.role === 'assistant');
+  for (const m of c.messages) thread.append(renderHistory(m, m === lastAssistant));
+  app.lastAssistantId = lastAssistant?.id ?? null;
+  if (!c.messages.length) showWelcome();
+  files.refresh(id); refreshChats(); scrollDown(true);
+}
+
+function renderHistory(m, isLast) {
+  if (m.role === 'user') return h('div', { class: 'msg user' }, h('div', { class: 'bubble', text: m.content }));
+  for (const a of m.artifacts) app.artifacts.add(a);
+  const msg = h('div', { class: 'msg assistant' });
+  if (m.task_id) {
+    const steps = h('button', { type: 'button', class: 'btn small', text: 'Show steps' });
+    steps.addEventListener('click', async () => {
+      steps.disabled = true;
+      try {
+        const r = await api(`/api/runs/${m.task_id}/events`);
+        const rv = new RunView({ artifacts: app.artifacts, replay: true });
+        r.events.forEach((e) => rv.handle(e)); rv.toggle(false);
+        steps.replaceWith(rv.el);
+      } catch (e) { toast(e.message); steps.disabled = false; }
+    });
+    msg.append(steps);
+  }
+  msg.append(h('div', { class: 'answer' }, renderMarkdown(m.content, (id) => app.artifacts.node(id))));
+  for (const n of m.notices || []) msg.append(h('div', { class: 'notice', text: n }));
+  if (m.files.length) msg.append(h('div', { class: 'btn-row' }, m.files.map((f) => h('span', { class: 'file-chip' }, '📄 ', f.name, h('button', { type: 'button', class: 'btn small', text: 'Open', onclick: () => { openFilesPanel(); files.open(f); } })))));
+  msg.append(messageFooter({ msg: { id: m.id, rating: m.rating, credits: m.credits }, onRate: rate }));
+  if (isLast && m.buttons.length) msg.append(nextButtons(m.buttons, (l) => nextStep(l, m.id)));
+  return msg;
+}
+
+const rate = (id, v) => api(`/api/messages/${id}/rating`, { method: 'POST', body: { rating: v } }).catch(() => toast('Could not save your rating.'));
+
+function nextStep(label, messageId) {
+  const l = label.toLowerCase().trim();
+  const opts = { message: label };
+  if (/^explain simpler/.test(l)) { opts.intent = 'simplify'; opts.target_message = messageId ?? app.lastAssistantId; }
+  else if (/^quiz me/.test(l)) opts.intent = 'quiz';
+  else if (/^show a (graph|chart)/.test(l)) opts.intent = 'chart';
+  send(opts);
+}
+
+// ------------------------------------------------------------------ sending
+function buildPayload(message, opts = {}) {
+  const p = {
+    message, conversation_id: app.convId, mode: S.mode, brains: S.brains, effort: S.effort, rounds: S.rounds, tries: S.tries,
+    max_credits: S.cap, tools: S.tools, skills: S.skills, private_route: S.private || null, uploads: app.uploads.map((u) => u.id),
+  };
+  if (opts.intent) p.intent = opts.intent;
+  if (opts.target_message) p.target_message = opts.target_message;
+  return p;
+}
+
+async function send(opts = {}) {
+  if (app.running) return;
+  const text = (opts.message ?? input.value).trim();
+  if (!text && !opts.payload) return;
+  if (!opts.payload && app.boot && app.available < 1) return toast('You are out of credits.');
+  $('.welcome', thread)?.remove();
+  const payload = opts.payload || buildPayload(text, opts);
+  if (!opts.noEcho) {
+    thread.append(h('div', { class: 'msg user' }, h('div', { class: 'bubble', text }, app.uploads.length ? h('div', { class: 'muted small', text: '📎 ' + app.uploads.map((u) => u.name).join(', ') }) : null)));
+    input.value = ''; autoGrow();
+  }
+  app.uploads = []; paintAttachments();
+  app.lastPayload = payload;
+  const msgEl = h('div', { class: 'msg assistant' });
+  const run = new RunView({
+    artifacts: app.artifacts,
+    onFile: () => { files.refresh(app.convId); openFilesPanelSoft(); },
+    onAsk: (a) => handleAsk(a, msgEl),
+  });
+  run.onPaint = () => scrollDown();
+  msgEl.append(run.el); thread.append(msgEl); scrollDown(true);
+  setRunning(true);
+  app.controller = new AbortController();
+  try {
+    await streamChat(payload, (ev) => {
+      if (ev.type === 'hello') {
+        if (!app.convId) $('#chat-title').textContent = text.slice(0, 60);
+        app.convId = ev.conversation_id; app.taskId = ev.task_id; store.set('sh.run', { conv: ev.conversation_id, task: ev.task_id }); store.set('sh.conv', ev.conversation_id);
+      }
+      run.handle(ev);
+      if (ev.type === 'text') run.ensureAnswer(msgEl);
+      scrollDown();
+    }, app.controller.signal);
+  } catch (e) {
+    run.handle({ type: 'error', text: e instanceof ApiError ? e.message : 'Something went wrong. Please try again.', retry: !!(e && e.status !== 429 && e.status !== 400) });
+    run.handle({ type: 'run_done', status: 'error', used: 0, max: 0 });
+  } finally {
+    setRunning(false); store.set('sh.run', null);
+    finishMessage(run, msgEl);
+    refreshWallet(); refreshChats(); files.refresh(app.convId);
+  }
+}
+
+function finishMessage(run, msgEl) {
+  if (run.answerEl) {
+    if (run.notices?.length) run.notices.forEach((n) => msgEl.append(h('div', { class: 'notice', text: n })));
+    if (run.files.length) msgEl.append(h('div', { class: 'btn-row' }, run.files.map((f) => h('span', { class: 'file-chip' }, '📄 ', f.name, h('button', { type: 'button', class: 'btn small', text: 'Open', onclick: () => { openFilesPanel(); files.open(f); } })))));
+    msgEl.append(messageFooter({ msg: { id: run.messageId, credits: run.credits ?? run.used }, onRate: rate }));
+    if (run.buttons.length && run.status !== 'error') msgEl.append(nextButtons(run.buttons, (l) => nextStep(l, run.messageId)));
+    if (run.messageId) app.lastAssistantId = run.messageId;
+  }
+  scrollDown();
+}
+
+function handleAsk(a, msgEl) {
+  if (a.kind === 'topup') return showCredits();
+  const old = app.lastPayload;
+  msgEl.remove();
+  if (a.kind === 'confirm' || a.kind === 'retry') send({ payload: { ...old, confirm: true }, noEcho: true });
+  else if (a.kind === 'continue') send({ payload: { ...old, message: 'Continue the task.', continue_task: a.task_id, extra_credits: a.extra, confirm: true, max_credits: null }, noEcho: true });
+  else if (a.kind === 'raise') {
+    const m = currentMode(app.boot, S) || app.boot.modes.find((x) => x.id === 'normal');
+    send({ payload: { ...old, max_credits: Math.min(m.max_credits, Math.max(2, (old.max_credits || app.boot.user.auto_spend) * 2)), confirm: true }, noEcho: true });
+  }
+}
+
+function setRunning(on) {
+  app.running = on;
+  $('#send-btn').hidden = on; $('#stop-btn').hidden = !on;
+  input.disabled = false; $$('#chips .chip').forEach((c) => { c.disabled = on; });
+}
+
+async function stopRun() {
+  if (!app.taskId) return;
+  $('#stop-btn').disabled = true;
+  try { await api(`/api/runs/${app.taskId}/stop`, { method: 'POST' }); } catch (e) { toast(e.message); }
+  setTimeout(() => { $('#stop-btn').disabled = false; }, 1500);
+}
+
+// A reload while a run is working: replay what happened, then keep following until it ends.
+async function resumeRun(taskId, convId) {
+  let after = 0, done = false;
+  const msgEl = h('div', { class: 'msg assistant' });
+  const run = new RunView({ artifacts: app.artifacts, onAsk: () => {}, onFile: () => files.refresh(convId) });
+  run.onPaint = () => scrollDown();
+  msgEl.append(run.el); thread.append(msgEl);
+  setRunning(true); app.taskId = taskId;
+  while (!done) {
+    let r;
+    try { r = await api(`/api/runs/${taskId}/events?after=${after}`); } catch { break; }
+    for (const ev of r.events) { after = ev.seq; run.handle(ev); if (ev.type === 'text') run.ensureAnswer(msgEl); if (ev.type === 'run_done') done = true; }
+    if (!done) await new Promise((res) => setTimeout(res, 1000));
+  }
+  setRunning(false); store.set('sh.run', null);
+  if (run.status === 'done') { thread.replaceChildren(); await openConversation(convId); } else finishMessage(run, msgEl);
+  refreshWallet();
+}
+
+// ------------------------------------------------------------------ scrolling
+function nearBottom() { return wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 140; }
+function scrollDown(force) {
+  if (force || app.stick) wrap.scrollTop = wrap.scrollHeight;
+  $('#to-bottom').hidden = nearBottom();
+}
+
+// ------------------------------------------------------------------ composer: chips, estimate, attachments
+function paintChips() {
+  const b = app.boot, mode = currentMode(b, S);
+  const chip = (label, value, focus, cls = '') => h('button', { type: 'button', class: `chip ${cls}`, onclick: () => openSettings(focus) }, `${label}: `, h('b', { text: value }));
+  const brainText = (() => {
+    if (!mode) return 'Auto';
+    const r = Object.values(S.brains)[0];
+    if (!r) return 'Auto';
+    const first = [].concat(r)[0];
+    return (b.models.find((m) => m.id === first)?.name || 'Custom') + (Object.keys(S.brains).length > 1 ? ' +' : '');
+  })();
+  $('#chips').replaceChildren(
+    chip('Mode', modeName(b, S), 'mode'),
+    chip('Brain', brainText, 'brain', 'hide-m'),
+    chip('Effort', b.efforts.find((e) => e.id === S.effort)?.label || 'Auto', 'effort', 'hide-m'),
+    chip('Tools', String(S.tools.length), 'tools', 'hide-m'),
+    h('button', { type: 'button', class: 'chip', onclick: () => openSettings('mode'), 'aria-label': 'All settings' }, '⚙ Settings'));
+}
+
+let estTimer;
+function scheduleEstimate() { clearTimeout(estTimer); estTimer = setTimeout(runEstimate, 280); }
+async function runEstimate() {
+  const seq = ++app.estSeq;
+  const el = $('#estimate');
+  try {
+    const e = await api('/api/estimate', { method: 'POST', body: { ...buildPayload(input.value.slice(0, 600) || 'hello'), conversation_id: null, uploads: [] } });
+    if (seq !== app.estSeq) return;
+    app.est = e;
+    const cap = S.cap ?? e.cap;
+    el.replaceChildren(`${e.mode_name}: about `, h('b', { text: `${e.credits} credit${e.credits === 1 ? '' : 's'}` }), `, up to ${cap}`,
+      e.needs_confirm ? ' · asks first' : '', cap < e.credits ? ' · cap is low, may stop early' : '', app.available != null && app.available < Math.min(cap, e.credits) ? ' · not enough credits' : '');
+    el.title = e.parts.map((p) => `${p.name}: $${p.usd.toFixed(5)}`).join('\n');
+    el.classList.toggle('warn', cap < e.credits);
+  } catch (err) {
+    if (seq !== app.estSeq) return;
+    el.textContent = err.message;
+  }
+}
+
+function paintAttachments() {
+  $('#attachments').replaceChildren(...app.uploads.map((u, i) => h('span', { class: 'attach' }, '📎 ' + u.name, h('button', { type: 'button', 'aria-label': `Remove ${u.name}`, text: '✕', onclick: () => { app.uploads.splice(i, 1); paintAttachments(); } }))));
+}
+
+function autoGrow() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 180) + 'px'; }
+
+// ------------------------------------------------------------------ sheets and dialogs
+function showSheet(id) { const s = $(id); s.hidden = false; s.dataset.prevFocus = ''; s._prev = document.activeElement; s.querySelector('button, input, select')?.focus(); }
+function hideSheet(id) { const s = $(id); s.hidden = true; s._prev?.focus?.(); }
+
+function openSettings(focus) {
+  const body = buildSettings(app.boot, S, { focus, onChange: () => { persist(); paintChips(); scheduleEstimate(); } });
+  $('#settings-body').replaceChildren(body);
+  showSheet('#settings');
+}
+
+function dialog(title, ...content) {
+  $('#dialog-title').textContent = title;
+  $('#dialog-body').replaceChildren(...content);
+  showSheet('#dialog');
+}
+
+async function showProfile() {
+  const p = await api('/api/profile').catch(() => ({}));
+  const f = (k, label, ph) => h('label', { class: 'small' }, label, h('input', { class: 'input', id: `pf-${k}`, value: Array.isArray(p[k]) ? p[k].join(', ') : (p[k] || ''), placeholder: ph }));
+  dialog('What I remember about you',
+    h('p', { class: 'muted small', text: 'This small card helps me pick examples and the right level. You can edit or delete it any time.' }),
+    f('level', 'Level (beginner, medium, advanced)', 'beginner'), f('interests', 'Interests (comma separated)', 'cricket, cooking'), f('language', 'Language', 'English'),
+    f('likes', 'How you like answers', 'short answers, step by step maths'), f('weak_topics', 'Topics you find hard', 'fractions'), f('goal', 'Your goal', 'pass the physics exam'),
+    h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn primary', text: 'Save', onclick: async () => {
+        const list = (k) => $(`#pf-${k}`).value.split(',').map((x) => x.trim()).filter(Boolean).slice(0, 6);
+        await api('/api/profile', { method: 'PUT', body: { level: $('#pf-level').value.trim(), interests: list('interests'), language: $('#pf-language').value.trim(), likes: $('#pf-likes').value.trim(), weak_topics: list('weak_topics'), goal: $('#pf-goal').value.trim() } });
+        hideSheet('#dialog'); toast('Saved.');
+      } }),
+      h('button', { type: 'button', class: 'btn danger', text: 'Forget everything', onclick: async () => { await api('/api/profile', { method: 'DELETE' }); hideSheet('#dialog'); toast('Memory deleted.'); } })));
+}
+
+async function showCredits() {
+  const w = await api('/api/wallet');
+  const rows = w.ledger.slice(0, 12).map((r) => h('tr', null, h('td', { text: (r.delta > 0 ? '+' : '') + r.delta }), h('td', { text: r.reason }), h('td', { text: timeAgo(r.created_at) })));
+  dialog('Credits',
+    h('p', null, h('b', { text: String(w.available) }), ` credits available${w.held ? ` (${w.held} on hold for running jobs)` : ''}.`),
+    app.boot.dev_mode ? h('button', { type: 'button', class: 'btn primary', text: 'Add 500 test credits', onclick: async () => { await api('/api/dev/topup', { method: 'POST', body: { credits: 500 } }); refreshWallet(); hideSheet('#dialog'); toast('Added 500 credits.'); } })
+      : h('p', { class: 'muted small', text: 'Payments are not connected yet. Plans refresh credits every month.' }),
+    h('div', { class: 'md' }, h('table', null, h('thead', null, h('tr', null, h('th', { text: 'Change' }), h('th', { text: 'Reason' }), h('th', { text: 'When' }))), h('tbody', null, rows))));
+}
+
+// ------------------------------------------------------------------ panels
+function closeSide() { delete $('#app').dataset.side; $('#scrim').hidden = true; }
+function openFilesPanel() { $('#app').dataset.files = 'open'; $('#files-toggle').setAttribute('aria-expanded', 'true'); if (matchMedia('(max-width: 1100px)').matches) $('#scrim').hidden = false; }
+function openFilesPanelSoft() { if (!matchMedia('(max-width: 1100px)').matches) openFilesPanel(); }
+function closeFilesPanel() { $('#app').dataset.files = 'closed'; $('#files-toggle').setAttribute('aria-expanded', 'false'); $('#scrim').hidden = true; }
+
+function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; }
+
+// ------------------------------------------------------------------ wiring
+function wireStatic() {
+  $('#composer').addEventListener('submit', (e) => { e.preventDefault(); send(); });
+  input.addEventListener('input', () => { autoGrow(); scheduleEstimate(); });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+  $('#stop-btn').addEventListener('click', stopRun);
+  $('#new-chat').addEventListener('click', () => { closeSide(); newChat(); });
+  $('#open-side').addEventListener('click', () => { $('#app').dataset.side = 'open'; $('#scrim').hidden = false; });
+  $('#close-side').addEventListener('click', closeSide);
+  $('#scrim').addEventListener('click', () => { closeSide(); if (matchMedia('(max-width: 1100px)').matches) closeFilesPanel(); });
+  $('#files-toggle').addEventListener('click', () => ($('#app').dataset.files === 'open' ? closeFilesPanel() : openFilesPanel()));
+  $('#open-files-btn').addEventListener('click', () => { closeSide(); openFilesPanel(); files.refresh(null); });
+  $('#close-files').addEventListener('click', closeFilesPanel);
+  $('#settings-close').addEventListener('click', () => hideSheet('#settings'));
+  $('#dialog-close').addEventListener('click', () => hideSheet('#dialog'));
+  for (const id of ['#settings', '#dialog']) $(id).addEventListener('click', (e) => { if (e.target === $(id)) hideSheet(id); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { hideSheet('#settings'); hideSheet('#dialog'); closeSide(); } });
+  $('#open-profile').addEventListener('click', () => { closeSide(); showProfile(); });
+  $('#credit-pill').addEventListener('click', showCredits);
+  $('#wallet').addEventListener('dblclick', showCredits);
+  $('#theme-toggle').addEventListener('click', () => {
+    const dark = (document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+    const next = dark ? 'light' : 'dark'; applyTheme(next); store.set('sh.theme', next);
+  });
+  $('#dev-plan').addEventListener('change', async (e) => {
+    await api('/api/dev/plan', { method: 'POST', body: { plan: e.target.value } });
+    app.boot = await api('/api/bootstrap'); sanitizeSettings(); persist(); paintPlan(); paintWallet(app.boot.wallet); paintChips(); scheduleEstimate(); toast(`Now testing as the ${e.target.value} plan.`);
+  });
+  $('#dev-topup').addEventListener('click', async () => { await api('/api/dev/topup', { method: 'POST', body: { credits: 500 } }); refreshWallet(); toast('Added 500 credits.'); });
+  $('#delete-files').addEventListener('click', () => dialog('Delete all my files?', h('p', { text: 'This removes every file the assistant made for you, and your uploads. It cannot be undone.' }),
+    h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn danger', text: 'Delete everything', onclick: async () => { await api('/api/workspace', { method: 'DELETE' }); hideSheet('#dialog'); files.refresh(app.convId); $('#preview').hidden = true; toast('Files deleted.'); } }),
+      h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: () => hideSheet('#dialog') }))));
+  $('#file-input').addEventListener('change', async (e) => {
+    const f = e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    try { const u = await uploadFile(f); app.uploads.push(u); paintAttachments(); toast(`Added ${u.name}`); } catch (err) { toast(err.message); }
+  });
+  wrap.addEventListener('scroll', () => { app.stick = nearBottom(); $('#to-bottom').hidden = app.stick; }, { passive: true });
+  $('#to-bottom').addEventListener('click', () => { app.stick = true; scrollDown(true); });
+}
+
+init();

@@ -127,7 +127,9 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         out = []
         for m in modes_mod.listing(db):
             ok = modes_mod.allowed(m, user["plan"])
-            out.append({**m, "allowed": ok, "locked": None if ok else f"Needs {min(m['plans'], key=lambda p: wallet.PLANS[p]['price'])} plan"})
+            order = ["free", "student", "pro", "school"]
+            need = next((p for p in order if p in m["plans"]), "pro")
+            out.append({**m, "allowed": ok, "locked": None if ok else f"Needs the {need.title()} plan"})
         return out
 
     # ---- bootstrap: everything the pickers need ----------------------------------------------
@@ -266,7 +268,7 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
                     files.append(workspace.file_row(db, fid))
             msgs.append({"id": m["id"], "role": m["role"], "content": m["content"], "task_id": m["task_id"],
                          "rating": m["rating"], "buttons": meta.get("buttons", []), "artifacts": arts, "files": files,
-                         "notices": meta.get("notices", []), "mode": meta.get("mode")})
+                         "notices": meta.get("notices", []), "mode": meta.get("mode"), "credits": meta.get("credits")})
         return {"id": cid, "title": c["title"], "messages": msgs}
 
     @app.delete("/api/conversations/{cid}")

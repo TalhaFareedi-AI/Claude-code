@@ -737,7 +737,7 @@ class Harness:
             "INSERT INTO messages(conversation_id,role,content,meta,task_id,created_at) VALUES(?,?,?,?,?,?)",
             (ctx.req.conversation_id, "assistant", text,
              jdump({"artifacts": [a["id"] for a in arts], "files": [f["id"] for f in ctx.files], "buttons": buttons,
-                    "mode": ctx.mode["id"], "notices": ctx.notices}), ctx.task["id"], now())).lastrowid
+                    "mode": ctx.mode["id"], "notices": ctx.notices, "credits": ctx.meter.credits}), ctx.task["id"], now())).lastrowid
         self.db.run("UPDATE conversations SET updated_at=? WHERE id=?", (now(), ctx.req.conversation_id))
         ctx.emit("answer", message_id=mid, buttons=buttons, credits=ctx.meter.credits, notices=ctx.notices)
 
