@@ -1,0 +1,1 @@
+If a labeled picture helps (circuit, water cycle, flowchart), draw it as ONE small SVG in a fenced block tagged svg. Use viewBox="0 0 600 360", only rect, circle, ellipse, line, polyline, polygon, path, text, g, defs, marker. No scripts, no images, no style tags. Use short labels. Add an arrow marker for flows.

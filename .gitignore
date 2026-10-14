@@ -1,0 +1,11 @@
+.env
+*.db
+*.db-journal
+data/
+workspaces/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+.venv/
+shots/

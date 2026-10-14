@@ -1,0 +1,776 @@
+"""The harness (sections 2 and 3). Same checklist for every message:
+
+ receive -> wallet check -> build desk -> route -> (plan) -> do steps -> check -> teacher layer -> bill -> learn
+
+Every AI call goes through RunContext.call, which is the meter: no call goes uncounted.
+"""
+import asyncio
+import json
+import math
+import re
+import shutil
+import time
+import uuid
+from dataclasses import dataclass, field
+from decimal import Decimal
+
+from . import catalog, charts, modes as modes_mod, prompts, skills, wallet, workspace
+from .config import settings
+from .db import DB, jdump, jload, now
+from .estimate import estimate
+from .openrouter import LLMResult, OpenRouter, OpenRouterError, build_reasoning
+from .plans import rules as plan_rules
+from .pricing import EFFORT_ORDER, call_cost, clamp_effort, credits_for_cost
+from .tools import calc as calc_tool, diagram
+
+CONTROL_ROLES = {"planner", "checker", "critic", "judge"}  # effort dial does not touch these
+GREETING = re.compile(r"^\s*(hi|hello|hey|thanks?|thank you|ok(ay)?|good (morning|evening|night)|bye)\b[\s!.?]*$", re.I)
+HARD_WORDS = re.compile(r"\b(step by step|prove|derive|design|build|plan|compare|analy[sz]e|research paper|in depth|complete|full)\b", re.I)
+
+
+class RunStopped(Exception):
+    pass
+
+
+class LimitReached(Exception):
+    def __init__(self, kind: str):
+        super().__init__(kind)
+        self.kind = kind  # "credits" | "time" | "steps"
+
+
+class UserError(Exception):
+    """A problem the user can fix (bad mode, plan limit). Never a crash."""
+
+
+@dataclass
+class RunRequest:
+    message: str
+    mode: str = "auto"
+    brains: dict = field(default_factory=dict)      # role -> model id (or list of ids)
+    effort: str = "auto"
+    rounds: int | None = None
+    tries: int | None = None
+    max_credits: int | None = None
+    tools: list[str] = field(default_factory=lambda: ["chart", "diagram", "documents", "ppt"])
+    skills: list[str] | None = None                 # None = all enabled
+    intent: str | None = None                       # set by buttons: simplify, quiz, chart, make_ppt...
+    conversation_id: str | None = None
+    confirm: bool = False
+    continue_task: str | None = None
+    extra_credits: int = 0
+    private_route: bool | None = None
+    target_message: int | None = None               # message id for "Explain simpler"
+    uploads: list[str] = field(default_factory=list)  # workspace_files ids from /api/upload
+
+
+def tokens_of(text: str) -> int:
+    return max(1, int(len(text) / 3.5))
+
+
+def parse_json(text: str):
+    """Pull the first JSON object out of a model reply (handles fences and chatter)."""
+    t = text.strip()
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t, flags=re.S).strip()
+    try:
+        return json.loads(t)
+    except ValueError:
+        pass
+    start = t.find("{")
+    while start != -1:
+        depth, in_str, esc = 0, False, False
+        for i in range(start, len(t)):
+            c = t[i]
+            if in_str:
+                esc = (c == "\\" and not esc)
+                if c == '"' and not esc:
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(t[start:i + 1])
+                    except ValueError:
+                        break
+        start = t.find("{", start + 1)
+    raise ValueError("no JSON found")
+
+
+# ---------------------------------------------------------------------------------
+class Emitter:
+    """Sends small events to the screen and saves each one, so a reload can replay the run."""
+
+    def __init__(self, db: DB, task_id: str):
+        self.db, self.task_id, self.seq = db, task_id, 0
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.closed = False
+
+    def emit(self, type_: str, **data) -> dict:
+        self.seq += 1
+        ev = {"seq": self.seq, "type": type_, **data}
+        self.db.run("INSERT INTO run_events(task_id,seq,type,data,created_at) VALUES(?,?,?,?,?)",
+                    (self.task_id, self.seq, type_, jdump(data), now()))
+        if not self.closed:
+            self.queue.put_nowait(ev)
+        return ev
+
+    def close(self) -> None:
+        self.closed = True
+        self.queue.put_nowait(None)
+
+    async def stream(self):
+        while True:
+            ev = await self.queue.get()
+            if ev is None:
+                return
+            yield ev
+
+
+class Meter:
+    """Counts every token of every call. One usage_events row per call."""
+
+    def __init__(self, db: DB, user_id: str, task_id: str, max_credits: int):
+        self.db, self.user_id, self.task_id = db, user_id, task_id
+        self.max_credits = max_credits
+        self.usd = Decimal(0)
+        self.credits = 0
+        self.step_no = 0
+        self.lock = asyncio.Lock()
+
+    def credits_if(self, extra_usd: Decimal) -> int:
+        return credits_for_cost(self.usd + extra_usd)
+
+    async def record(self, role: str, model: dict, res: LLMResult, *, tool_units: dict | None = None,
+                     extra_usd: float = 0.0, billable: bool = True) -> int:
+        async with self.lock:
+            u = res.usage
+            if u.cost is not None:
+                cost, src = Decimal(repr(float(u.cost))), "openrouter"
+            else:
+                cost = call_cost(model["price_in"], model["price_out"], u.prompt, u.completion, u.cached,
+                                 model.get("price_cached"))
+                src = "table"
+            if src == "table":  # OpenRouter's own cost already includes plugin fees
+                cost += Decimal(repr(float(extra_usd)))
+            self.usd += cost if billable else Decimal(0)
+            new_credits = credits_for_cost(self.usd) if billable else self.credits
+            delta = new_credits - self.credits
+            self.credits = new_credits
+            self.step_no += 1
+            self.db.run(
+                "INSERT INTO usage_events(user_id,task_id,step_no,role,model,input_tokens,cached_tokens,output_tokens,"
+                "reasoning_tokens,tool_units,cost_usd,cost_source,credits_charged,finish_reason,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (self.user_id, self.task_id, self.step_no, role, res.model, u.prompt, u.cached, u.completion,
+                 u.reasoning, jdump(tool_units or {}), float(cost), src, delta, res.finish_reason, now()))
+            if billable:
+                self.db.run("UPDATE tasks SET credits_used=?, usd_used=? WHERE id=?",
+                            (self.credits, float(self.usd), self.task_id))
+            return delta
+
+
+class RunContext:
+    def __init__(self, harness: "Harness", user: dict, task: dict, req: RunRequest, mode: dict, emitter: Emitter):
+        self.h, self.db, self.llm = harness, harness.db, harness.llm
+        self.user, self.task, self.req, self.mode, self.em = user, task, req, mode, emitter
+        self.plan = user["plan"]
+        self.rules = plan_rules(self.plan)
+        self.private = bool(req.private_route if req.private_route is not None else user.get("private_route"))
+        self.meter = Meter(self.db, user["id"], task["id"], task["max_credits"])
+        self.stop_flag = False
+        self.deadline = time.monotonic() + settings.task_time_limit_s
+        self.intent = req.intent or "chat"
+        self.needs: list[str] = []
+        self.artifacts: list[dict] = []
+        self.files: list[dict] = []
+        self.notices: list[str] = []
+        self.history: list[dict] = []
+        self.file_texts: list[tuple[str, str]] = []
+        self.profile: dict = {}
+        self.summary = ""
+        self._brain_cache: dict = {}
+        self.runner = mode["runner"]
+        self.rounds: int | None = None
+        self.tries: int | None = None
+        self.best = ""
+
+    # ---- events -------------------------------------------------------------
+    def emit(self, type_: str, **data):
+        return self.em.emit(type_, **data)
+
+    def cost_event(self) -> None:
+        self.emit("cost", used=self.meter.credits, max=self.task["max_credits"])
+
+    def emit_text(self, text: str) -> None:
+        """Send a finished answer as text pieces (the screen types it live)."""
+        for i in range(0, len(text), 160):
+            self.emit("text", delta=text[i:i + 160])
+
+    # ---- brains ---------------------------------------------------------------
+    def effort(self, role: str) -> str:
+        default = self.mode["reasoning"].get(role, "off")
+        if self.req.effort != "auto" and role not in CONTROL_ROLES and default != "off":
+            return clamp_effort(self.req.effort, self.plan)
+        return clamp_effort(default, self.plan)
+
+    def _pick(self, spec: str, role: str, exclude: tuple = ()) -> dict:
+        tiers = self.rules["tiers"]
+        if spec == "code":
+            for mid in catalog.CODING_BRAINS:
+                m = catalog.get(self.db, mid)
+                if m and m["available"] and m["approved"] and m["tier"] in tiers:
+                    return m
+            spec = "tier:smart"
+        tier = spec.split(":", 1)[1] if spec.startswith("tier:") else None
+        if tier is None:
+            m = catalog.get(self.db, spec)
+            if not m or not m["available"] or not m["approved"]:
+                raise UserError(f"The model {spec} is not available.")
+            return m
+        need = self.effort(role) not in ("off", "auto")
+        return catalog.resolve(self.db, tier, need_thinks=need, exclude=exclude, tiers_allowed=tiers)
+
+    def brains(self, role: str) -> list[dict]:
+        if role in self._brain_cache:
+            return self._brain_cache[role]
+        user_pick = self.req.brains.get(role)
+        out: list[dict] = []
+        if user_pick:
+            ids = user_pick if isinstance(user_pick, list) else [user_pick]
+            for mid in ids:
+                m = catalog.get(self.db, mid)
+                if not m or not m["available"] or not m["approved"]:
+                    raise UserError(f"The model {mid} is not available.")
+                if m["tier"] not in self.rules["tiers"]:
+                    raise UserError(f"{m['name']} needs a higher plan.")
+                out.append(m)
+        else:
+            slot = self.mode["slots"][role]
+            specs = slot if isinstance(slot, list) else [slot]
+            picked: list[dict] = []
+            for spec in specs:
+                taken = tuple(p["id"] for p in picked)
+                labs = {p["lab"] for p in picked}
+                try:  # prefer a new lab: different labs make different mistakes
+                    m = self._pick(spec, role, exclude=taken + tuple(
+                        r["id"] for r in catalog.listing(self.db) if r["lab"] in labs and len(specs) > 1))
+                except LookupError:
+                    m = self._pick(spec, role, exclude=taken)
+                picked.append(m)
+            out = picked
+        if self.private:
+            bad = [m["name"] for m in out if not m.get("private_route")]
+            if bad:
+                raise UserError(f"Private route is on, and {', '.join(bad)} cannot use it.")
+        self._brain_cache[role] = out
+        return out
+
+    def brain(self, role: str) -> dict:
+        return self.brains(role)[0]
+
+    def quick(self) -> dict:
+        key = "_quick"
+        if key not in self._brain_cache:
+            self._brain_cache[key] = [catalog.resolve(self.db, "quick", tiers_allowed=self.rules["tiers"])]
+        return self._brain_cache[key][0]
+
+    # ---- stops --------------------------------------------------------------
+    def check_stop(self) -> None:
+        if self.stop_flag:
+            raise RunStopped()
+        if time.monotonic() > self.deadline:
+            raise LimitReached("time")
+
+    def check_budget(self, planned: list[tuple[dict, list, int]]) -> None:
+        """Stop 1: money. Upper-bound the next calls before sending them."""
+        extra = Decimal(0)
+        for model, messages, max_tokens in planned:
+            tin = sum(tokens_of(m["content"]) if isinstance(m["content"], str) else 500 for m in messages)
+            extra += call_cost(model["price_in"], model["price_out"], tin, max_tokens)
+        if self.meter.credits_if(extra) > self.task["max_credits"]:
+            raise LimitReached("credits")
+
+    # ---- the one place AI is called -------------------------------------------------
+    async def call(self, role: str, model: dict, messages: list, *, max_tokens: int, effort: str = "off",
+                   json_mode: bool = False, stream: bool = False, plugins: list | None = None,
+                   extra_usd: float = 0.0, budget_check: bool = True) -> LLMResult:
+        self.check_stop()
+        if budget_check:
+            self.check_budget([(model, messages, max_tokens)])
+        reasoning = build_reasoning(model, effort, max_tokens)
+        fallbacks = catalog.fallbacks(self.db, model["id"], 2, private_only=self.private)
+        t0 = time.monotonic()
+        kw = dict(reasoning=reasoning, fallbacks=fallbacks, json_mode=json_mode, private=self.private,
+                  zdr=self.private and self.plan == "school", plugins=plugins)
+        try:
+            if stream:
+                async def on_delta(piece: str):
+                    self.emit("text", delta=piece)
+                res = await self.llm.chat_stream(model["id"], messages, max_tokens=max_tokens, on_delta=on_delta, **kw)
+            else:
+                res = await self.llm.chat(model["id"], messages, max_tokens=max_tokens, **kw)
+        except OpenRouterError:
+            raise
+        used = catalog.get(self.db, res.model) or model
+        await self.meter.record(role, used, res, extra_usd=extra_usd)
+        if res.reasoning_text or (res.usage.reasoning and effort not in ("off", "auto")):
+            self.emit("thinking", seconds=round(time.monotonic() - t0), tokens=res.usage.reasoning,
+                      summary=res.reasoning_text[:400])
+        self.cost_event()
+        # Thinking can eat all of max_tokens and leave an empty answer. Retry once, lower effort.
+        if not res.text.strip() and res.finish_reason == "length" and effort not in ("off", "auto") and not stream:
+            lower = EFFORT_ORDER[max(0, EFFORT_ORDER.index(effort) - 1)] if effort in EFFORT_ORDER else "off"
+            self.notices.append(f"{model['name']} ran out of room while thinking, so I retried with lower effort.")
+            self.emit("notice", text=self.notices[-1])
+            return await self.call(role, model, messages, max_tokens=int(max_tokens * 1.5), effort=lower,
+                                   json_mode=json_mode, plugins=plugins, budget_check=False)
+        return res
+
+    async def json_call(self, role: str, model: dict, messages: list, *, max_tokens: int, effort: str = "off",
+                        budget_check: bool = True) -> dict:
+        res = await self.call(role, model, messages, max_tokens=max_tokens, effort=effort, json_mode=True,
+                              budget_check=budget_check)
+        try:
+            return parse_json(res.text)
+        except ValueError:
+            fix = messages + [{"role": "assistant", "content": res.text[:1500]},
+                              {"role": "user", "content": "That was not valid JSON. Reply again with valid JSON only."}]
+            res = await self.call(role, model, fix, max_tokens=max_tokens, effort="off", json_mode=True,
+                                  budget_check=budget_check)
+            try:
+                return parse_json(res.text)
+            except ValueError as e:
+                raise UserError("The model did not return a readable answer. Please retry.") from e
+
+    async def parallel(self, coros: list):
+        """Start all tries at once; the user waits for the slowest, not the sum."""
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        return results
+
+    # ---- the desk (context budget, section 4) ----------------------------------------
+    def system_prompt(self) -> str:
+        parts = [prompts.get("teacher")]
+        if "chart" in self.needs and "chart" in self.req.tools:
+            parts.append(prompts.get("chart_rules"))
+        if "diagram" in self.req.tools and "diagram" in self.needs:
+            parts.append(prompts.get("diagram_rules"))
+        if self.intent == "quiz" or "quiz" in self.needs:
+            parts.append(prompts.get("quiz_rules"))
+        return "\n\n".join(parts)
+
+    def context_block(self) -> str:
+        bits = []
+        if self.profile:
+            bits.append("Reader profile: " + jdump(self.profile))
+        if self.summary:
+            bits.append("Earlier in this chat: " + self.summary)
+        return "\n".join(bits)
+
+    def history_messages(self, max_chars: int = 10000) -> list[dict]:
+        out, used = [], 0
+        for m in reversed(self.history[-6:]):
+            c = m["content"]
+            if used + len(c) > max_chars:
+                c = c[: max(0, max_chars - used)]
+            if not c:
+                break
+            out.append({"role": m["role"], "content": c})
+            used += len(c)
+        return list(reversed(out))
+
+    def user_content(self, text: str | None = None) -> str:
+        text = text if text is not None else self.req.message
+        if self.file_texts:
+            files = "\n".join(f'<file name="{n}">\n{t}\n</file>' for n, t in self.file_texts)
+            return f"{files}\n\n{text}"
+        return text
+
+    def base_messages(self, extra_system: str = "") -> list[dict]:
+        sys = self.system_prompt()
+        ctx = self.context_block()
+        if ctx:
+            sys += "\n\n" + ctx
+        if extra_system:
+            sys += "\n\n" + extra_system
+        return [{"role": "system", "content": sys}] + self.history_messages() + \
+               [{"role": "user", "content": self.user_content()}]
+
+
+# ---------------------------------------------------------------------------------
+@dataclass
+class RunResult:
+    text: str
+    paused: bool = False
+    streamed: bool = False
+    extra: dict = field(default_factory=dict)
+
+
+class Harness:
+    def __init__(self, db: DB, llm: OpenRouter):
+        self.db, self.llm = db, llm
+        self.active: dict[str, RunContext] = {}
+        self.background: set[asyncio.Task] = set()
+
+    # ---- helpers -------------------------------------------------------------------
+    def get_user(self, user_id: str) -> dict:
+        u = self.db.one("SELECT * FROM users WHERE id=?", (user_id,))
+        if not u:
+            self.db.run("INSERT INTO users(id,name,plan,auto_spend,created_at) VALUES(?,?,?,?,?)",
+                        (user_id, "Student", "free", settings.auto_spend_limit, now()))
+            wallet.grant_plan(self.db, user_id, "free")
+            u = self.db.one("SELECT * FROM users WHERE id=?", (user_id,))
+        return u
+
+    def attach_uploads(self, user_id: str, task_id: str, ids: list[str]) -> None:
+        """Copy the user's uploaded files into this task's inputs folder."""
+        inputs = workspace.task_dir(user_id, task_id) / "inputs"
+        for fid in ids[:5]:
+            row = self.db.one("SELECT * FROM workspace_files WHERE id=? AND user_id=? AND task_id='uploads'", (fid, user_id))
+            if row:
+                src = workspace.path_of(row)
+                if src.exists():
+                    shutil.copy2(src, inputs / re.sub(r"^[0-9a-f]{6}_", "", src.name))
+
+    def profile(self, user_id: str) -> dict:
+        r = self.db.one("SELECT data FROM profiles WHERE user_id=?", (user_id,))
+        return jload(r["data"], {}) if r else {}
+
+    async def drain(self) -> None:
+        """Wait for runs and background learning to finish (used by tests and shutdown)."""
+        while True:
+            pending = [t for t in self.background if not t.done()]
+            if not pending:
+                self.background.clear()
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.sleep(0)
+
+    def stop(self, task_id: str) -> bool:
+        ctx = self.active.get(task_id)
+        if ctx:
+            ctx.stop_flag = True
+        return bool(ctx)
+
+    # ---- routing (rules first, AI only when unsure) -------------------------------
+    def route_rules(self, req: RunRequest) -> dict:
+        m = req.message.strip()
+        low = m.lower()
+        words = len(m.split())
+        intent, needs = req.intent or "", []
+        if not intent:
+            if re.search(r"\b(ppt|powerpoint|slides?|slide deck|presentation)\b", low) and re.search(r"\b(make|create|build|generate|write|prepare)\b", low):
+                intent = "make_ppt"
+            elif re.search(r"\b(word doc|docx|document|essay|report|worksheet|lesson plan)\b", low) and re.search(r"\b(make|create|write|generate|prepare|draft)\b", low):
+                intent = "make_doc"
+            elif re.search(r"\b(research|latest|news|sources?|find out|look up|search the web)\b", low):
+                intent = "research"
+            elif re.search(r"\b(code|function|script|python|javascript|bug|refactor|regex|sql)\b", low):
+                intent = "code"
+            elif re.search(r"\bquiz\b|\btest me\b|\bflashcards?\b", low):
+                intent = "quiz"
+            elif re.search(r"\bsimpl(er|ify)\b|\beli5\b|easier words", low):
+                intent = "simplify"
+            elif re.search(r"\b(solve|calculate|compute|how much|how many)\b", low) or re.search(r"\d\s*[-+*/^]\s*\d", low):
+                intent = "solve"
+            elif words <= 6 and GREETING.match(m):
+                intent = "chat"
+            else:
+                intent = "teach"
+        if re.search(r"\b(chart|graph|plot|slider|visuali[sz]e|interactive)\b", low) or intent == "chart":
+            needs.append("chart")
+        if re.search(r"\b(diagram|flowchart|circuit|draw|water cycle)\b", low):
+            needs.append("diagram")
+        if intent == "quiz":
+            needs.append("quiz")
+        if GREETING.match(m) or (words <= 8 and not re.search(r"\d", m) and not needs and intent in ("chat", "teach")):
+            complexity = "easy"
+        elif words > 60 or HARD_WORDS.search(low) or intent in ("make_ppt", "make_doc"):
+            complexity = "hard"
+        else:
+            complexity = "medium"
+        return {"intent": intent, "needs": needs, "complexity": complexity,
+                "make_plan": intent in ("make_ppt", "make_doc") or complexity == "hard", "source": "rules"}
+
+    async def route(self, ctx: RunContext) -> dict:
+        r = self.route_rules(ctx.req)
+        ambiguous = ctx.req.mode == "auto" and r["complexity"] == "medium" and len(ctx.req.message.split()) >= 12 \
+            and not ctx.req.intent
+        if ambiguous:
+            try:
+                got = await ctx.json_call("router", ctx.quick(),
+                                          [{"role": "system", "content": prompts.get("router")},
+                                           {"role": "user", "content": ctx.req.message[:1500]}], max_tokens=200,
+                                          budget_check=False)
+                if got.get("complexity") in ("easy", "medium", "hard"):
+                    r["complexity"] = got["complexity"]
+                if got.get("intent") in ("teach", "solve", "make_ppt", "make_doc", "research", "code", "chat"):
+                    r["intent"] = got["intent"]
+                r["needs"] = sorted(set(r["needs"]) | {n for n in got.get("needs", []) if n in ("chart", "diagram", "quiz")})
+                r["make_plan"] = bool(got.get("make_plan"))
+                r["source"] = "ai"
+            except (OpenRouterError, UserError, LimitReached):
+                pass  # the rules answer stands
+        return r
+
+    def choose_mode(self, req: RunRequest, route: dict, plan: str) -> dict:
+        wanted = req.mode
+        if wanted == "auto":
+            intent, cx = route["intent"], route["complexity"]
+            wanted = {"easy": "fast", "medium": "normal", "hard": "deep"}[cx]
+            if intent == "research":
+                wanted = "research"
+            elif intent == "code":
+                wanted = "developer" if cx == "hard" else "normal"
+            elif intent in ("make_ppt", "make_doc"):
+                wanted = "deep"
+            m = modes_mod.get(self.db, wanted)
+            if not m or not modes_mod.allowed(m, plan):
+                m = modes_mod.get(self.db, "normal")
+            return m
+        m = modes_mod.get(self.db, wanted)
+        if not m:
+            raise UserError(f"Unknown mode {wanted}.")
+        if not modes_mod.allowed(m, plan):
+            raise UserError(f"{m['name']} is not part of your plan. Try Normal, or upgrade.")
+        return m
+
+    # ---- estimate (shown before the run) ---------------------------------------------
+    def make_estimate(self, ctx: RunContext, route: dict) -> dict:
+        mode = dict(ctx.mode)
+        if route["intent"] in ("make_ppt", "make_doc") and mode["runner"] == "deep":
+            mode["runner"] = "create"
+        ctx.runner = mode["runner"]
+        roles = {r: ctx.brains(r) for r in self._roles(mode)}
+        rounds = self._clamp(ctx.req.rounds, mode["params"].get("default_rounds"), 1,
+                             min(mode["params"].get("max_rounds", 5), ctx.rules["max_rounds"]))
+        tries = self._clamp(ctx.req.tries, mode["params"].get("default_tries"), 1,
+                            min(mode["params"].get("max_tries", 5), ctx.rules["max_tries"]))
+        ctx.rounds, ctx.tries = rounds, tries
+        est = estimate(mode, roles, rounds=rounds, tries=tries, effort=ctx.req.effort,
+                       chart="chart" in route["needs"])
+        est["rounds"], est["tries"] = rounds, tries
+        return est
+
+    @staticmethod
+    def _clamp(v, default, lo, hi):
+        if default is None:
+            return None
+        v = default if v is None else v
+        return max(lo, min(int(v), hi))
+
+    @staticmethod
+    def _roles(mode: dict) -> list[str]:
+        return list(mode["slots"].keys())
+
+    # ---- the run ---------------------------------------------------------------------
+    async def start(self, user_id: str, req: RunRequest) -> tuple[str, Emitter]:
+        """Create the task and start it in the background. The screen reads the emitter."""
+        user = self.get_user(user_id)
+        task_id = "t_" + uuid.uuid4().hex[:10]
+        em = Emitter(self.db, task_id)
+        conv_id = req.conversation_id
+        conv = self.db.one("SELECT * FROM conversations WHERE id=? AND user_id=?", (conv_id, user_id)) if conv_id else None
+        if not conv:
+            conv_id = "c_" + uuid.uuid4().hex[:10]
+            self.db.run("INSERT INTO conversations(id,user_id,title,created_at,updated_at) VALUES(?,?,?,?,?)",
+                        (conv_id, user_id, req.message.strip()[:60] or "New chat", now(), now()))
+        req.conversation_id = conv_id
+        self.db.run("INSERT INTO messages(conversation_id,role,content,meta,task_id,created_at) VALUES(?,?,?,?,?,?)",
+                    (conv_id, "user", req.message, "{}", task_id, now()))
+        self.db.run("INSERT INTO tasks(id,user_id,conversation_id,mode,intent,status,estimate,max_credits,config,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (task_id, user_id, conv_id, req.mode, req.intent or "", "starting", 0, 0,
+                     jdump({"mode": req.mode, "effort": req.effort}), now()))
+        task = asyncio.create_task(self._run(user, task_id, req, em))
+        self.background.add(task)
+        task.add_done_callback(self.background.discard)
+        return task_id, em
+
+    async def _run(self, user: dict, task_id: str, req: RunRequest, em: Emitter) -> None:
+        ctx: RunContext | None = None
+        held = False
+        status = "error"
+        try:
+            # 1-2. receive + wallet check
+            if wallet.available(self.db, user["id"]) < 1:
+                em.emit("run_start", task_id=task_id, conversation_id=req.conversation_id, mode="", brains={})
+                em.emit("ask", kind="topup", text="You are out of credits. Add credits or wait for your plan to refresh.",
+                        available=wallet.available(self.db, user["id"]))
+                status = "blocked"
+                return
+            if wallet.spent_today(self.db, user["id"]) > 5000:
+                raise UserError("Daily spending cap reached. Try again tomorrow.")
+            # 3-4. desk + route
+            route_ctx_mode = modes_mod.get(self.db, "normal")
+            task = self.db.one("SELECT * FROM tasks WHERE id=?", (task_id,))
+            ctx = RunContext(self, user, task, req, route_ctx_mode, em)
+            self.active[task_id] = ctx
+            ctx.profile = self.profile(user["id"])
+            conv = self.db.one("SELECT * FROM conversations WHERE id=?", (req.conversation_id,))
+            ctx.summary = conv["summary"] or ""
+            ctx.history = [{"role": m["role"], "content": m["content"]} for m in self.db.all(
+                "SELECT role,content FROM messages WHERE conversation_id=? AND task_id!=? ORDER BY id",
+                (req.conversation_id, task_id))]
+            if req.target_message:
+                row = self.db.one("SELECT content FROM messages WHERE id=? AND conversation_id=?",
+                                  (req.target_message, req.conversation_id))
+                if row:
+                    ctx.req.message = f"Explain this again in much simpler words, with an everyday example:\n\n{row['content'][:6000]}"
+            self.attach_uploads(user["id"], task_id, req.uploads)
+            ctx.file_texts = workspace.read_text_inputs(user["id"], task_id)
+            route = await self.route(ctx)
+            ctx.intent, ctx.needs = route["intent"], route["needs"]
+            mode = self.choose_mode(req, route, user["plan"])
+            ctx.mode = mode
+            if mode.get("daily_limit"):
+                day = now() - (now() % 86400)
+                used = self.db.scalar("SELECT COUNT(*) FROM tasks WHERE user_id=? AND mode=? AND created_at>=? AND status IN ('done','running','paused')",
+                                      (user["id"], mode["id"], day))
+                if used >= mode["daily_limit"]:
+                    raise UserError(f"{mode['name']} is limited to {mode['daily_limit']} runs a day. Try another mode.")
+            est = self.make_estimate(ctx, route)
+            cap = req.max_credits or min(mode["max_credits"], max(user["auto_spend"], est["credits"]))
+            cap = max(1, min(cap, mode["max_credits"]))
+            if req.continue_task:
+                cap = max(1, req.extra_credits)
+            ctx.task["max_credits"] = cap
+            ctx.meter.max_credits = cap
+            # Big jobs: show the plan and the estimate, ask once.
+            needs_ask = mode["big"] and est["credits"] > user["auto_spend"] and not req.confirm and not req.continue_task
+            brains_view = {r: [m["name"] for m in b] for r, b in ((r, ctx.brains(r)) for r in self._roles(mode))}
+            em.emit("run_start", task_id=task_id, conversation_id=req.conversation_id, mode=mode["id"],
+                    mode_name=mode["name"], runner=ctx.runner, intent=ctx.intent, brains=brains_view,
+                    estimate=est["credits"], max=cap, routed_by=route["source"])
+            if needs_ask:
+                em.emit("ask", kind="confirm", text=f"{mode['name']} will use about {est['credits']} credits, at most {cap}. Continue?",
+                        estimate=est["credits"], max=cap)
+                status = "awaiting_confirm"
+                return
+            # Hold the maximum; settle the real cost at the end.
+            hold_amount = cap if mode["big"] else min(cap, max(est["credits"] * 2, 5))
+            hold_amount = max(hold_amount, ctx.meter.credits + 1)
+            try:
+                wallet.hold(self.db, user["id"], task_id, hold_amount)
+                held = True
+            except wallet.InsufficientCredits as e:
+                em.emit("ask", kind="topup", text=f"This needs up to {e.need} credits and you have {e.available}. "
+                        "Pick a cheaper mode, lower the cost cap, or add credits.", need=e.need, available=e.available)
+                status = "blocked"
+                return
+            ctx.task["max_credits"] = min(cap, hold_amount)
+            ctx.meter.max_credits = ctx.task["max_credits"]
+            self.db.run("UPDATE tasks SET status='running', mode=?, intent=?, estimate=?, max_credits=?, config=? WHERE id=?",
+                        (mode["id"], ctx.intent, est["credits"], ctx.task["max_credits"],
+                         jdump({"effort": req.effort, "rounds": ctx.rounds, "tries": ctx.tries, "runner": ctx.runner}), task_id))
+            workspace.task_dir(user["id"], task_id, req.message[:30])
+            # 5-8. the mode runs, then check + teacher layer
+            from .runners import RUNNERS  # late import: runners use this module
+            result = await asyncio.wait_for(RUNNERS[ctx.runner](ctx), timeout=settings.task_time_limit_s + 30)
+            status = "paused" if result.paused else "done"
+            await self.finish(ctx, result)
+        except RunStopped:
+            status = "stopped"
+            if ctx:
+                await self._finish_partial(ctx, "Stopped. I kept what was finished.")
+        except LimitReached as e:
+            status = "stopped"
+            if ctx:
+                msg = {"credits": "I stopped at the credit limit.", "time": "I stopped at the time limit.",
+                       "steps": "I stopped at the step limit."}[e.kind]
+                await self._finish_partial(ctx, msg, ask=True)
+        except UserError as e:
+            em.emit("error", text=str(e), retry=False)
+            status = "error"
+        except asyncio.TimeoutError:
+            em.emit("error", text="That took too long, so I stopped it.", retry=True)
+            status = "error"
+        except OpenRouterError as e:
+            em.emit("error", text=f"The AI service had a problem ({str(e)[:140]}). Credits for this step are refunded.", retry=True)
+            status = "error"
+        except Exception as e:  # never leave the screen hanging
+            em.emit("error", text=f"Something went wrong on our side ({type(e).__name__}). Credits refunded.", retry=True)
+            status = "error"
+        finally:
+            real = 0
+            if ctx is not None:
+                real = ctx.meter.credits if (held and status != "error") else 0
+                if held:
+                    charged = wallet.settle(self.db, user["id"], task_id, real, reason=f"{ctx.mode['id']}")
+                    em.emit("settled", charged=charged, released=max(0, ctx.task["max_credits"] - charged))
+                self.active.pop(task_id, None)
+                try:
+                    workspace.cleanup_work(user["id"], task_id)
+                except Exception:
+                    pass
+            self.db.run("UPDATE tasks SET status=?, finished_at=?, credits_used=? WHERE id=?",
+                        (status, now(), real, task_id))
+            em.emit("run_done", status=status, used=real,
+                    max=ctx.task["max_credits"] if ctx else 0)
+            em.close()
+            if ctx is not None and status == "done":
+                self._schedule(self.learn(ctx))
+
+    def _schedule(self, coro) -> None:
+        t = asyncio.create_task(coro)
+        self.background.add(t)
+        t.add_done_callback(self.background.discard)
+
+    async def _finish_partial(self, ctx: RunContext, note: str, ask: bool = False) -> None:
+        text = getattr(ctx, "best", "") or ""
+        body = (text + "\n\n" if text else "") + f"_{note}_"
+        await self.finish(ctx, RunResult(body, extra={"partial": True}), final_check=False)
+        if ask:
+            ctx.emit("ask", kind="more_credits", text=f"{note} Raise the cost cap and run again to keep going.",
+                     used=ctx.meter.credits, max=ctx.task["max_credits"])
+
+    # ---- check + teacher layer ----------------------------------------------------------
+    async def finish(self, ctx: RunContext, result: RunResult, final_check: bool = True) -> None:
+        from .postprocess import finalize
+        text, buttons, arts = await finalize(ctx, result.text)
+        ctx.emit("text", delta=text, replace=True)  # also swaps streamed raw text for the cleaned version
+        ctx.best = text
+        mid = self.db.run(
+            "INSERT INTO messages(conversation_id,role,content,meta,task_id,created_at) VALUES(?,?,?,?,?,?)",
+            (ctx.req.conversation_id, "assistant", text,
+             jdump({"artifacts": [a["id"] for a in arts], "files": [f["id"] for f in ctx.files], "buttons": buttons,
+                    "mode": ctx.mode["id"], "notices": ctx.notices}), ctx.task["id"], now())).lastrowid
+        self.db.run("UPDATE conversations SET updated_at=? WHERE id=?", (now(), ctx.req.conversation_id))
+        ctx.emit("answer", message_id=mid, buttons=buttons, credits=ctx.meter.credits, notices=ctx.notices)
+
+    # ---- learn (background): summary + profile -------------------------------------------
+    async def learn(self, ctx: RunContext) -> None:
+        user_id, conv_id = ctx.user["id"], ctx.req.conversation_id
+        meter = Meter(self.db, user_id, ctx.task["id"], 10**6)  # platform cost, not billed to the user
+        try:
+            q = ctx.quick()
+            msgs = self.db.all("SELECT id,role,content FROM messages WHERE conversation_id=? ORDER BY id", (conv_id,))
+            conv = self.db.one("SELECT * FROM conversations WHERE id=?", (conv_id,))
+            # Compaction: keep the last 6 word for word, summarize older ones every few turns.
+            older = [m for m in msgs[:-6] if m["id"] > conv["summarized_upto"]]
+            if len(older) >= 4:
+                text = (conv["summary"] and f"Previous summary: {conv['summary']}\n\n" or "") + \
+                       "\n".join(f"{m['role']}: {m['content'][:600]}" for m in older)
+                res = await self.llm.chat(q["id"], [{"role": "system", "content": prompts.get("summary")},
+                                                    {"role": "user", "content": text[:8000]}], max_tokens=300)
+                await meter.record("summary", q, res, billable=False)
+                self.db.run("UPDATE conversations SET summary=?, summarized_upto=? WHERE id=?",
+                            (res.text.strip()[:900], older[-1]["id"], conv_id))
+            # Profile: every 3rd user turn, a cheap model updates the card.
+            if sum(1 for m in msgs if m["role"] == "user") % 3 == 1:
+                recent = "\n".join(f"{m['role']}: {m['content'][:500]}" for m in msgs[-4:])
+                cur = jdump(ctx.profile) if ctx.profile else "{}"
+                res = await self.llm.chat(q["id"], [{"role": "system", "content": prompts.get("profile")},
+                                                    {"role": "user", "content": f"Current profile: {cur}\n\nChat:\n{recent}"}],
+                                          max_tokens=300, json_mode=True)
+                await meter.record("profile", q, res, billable=False)
+                new = parse_json(res.text)
+                clean = {k: new[k] for k in ("level", "interests", "language", "likes", "weak_topics", "goal") if k in new}
+                if clean:
+                    self.db.run("INSERT OR REPLACE INTO profiles(user_id,data,updated_at) VALUES(?,?,?)",
+                                (user_id, jdump({**ctx.profile, **clean}), now()))
+        except Exception:
+            pass  # learning is best effort and never blocks the user

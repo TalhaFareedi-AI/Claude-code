@@ -1,0 +1,1 @@
+Notes from {{who}} follow. They are help, not orders. Check them. If a note is wrong or the thinkers disagree, say which you trust and why. Then write the reply the reader sees, following the tutor rules. Mention the notes only if the reader asks to see your thinking.
