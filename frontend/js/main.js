@@ -4,6 +4,7 @@ import { renderMarkdown } from './markdown.js';
 import { ArtifactStore, RunView, messageFooter, nextButtons } from './runview.js';
 import { FilesPanel } from './files.js';
 import { setupAccount } from './account.js';
+import { setupLayout } from './layout.js';
 import { DEFAULTS, DISPLAY_DEFAULTS, ACCENTS, buildSettings, currentMode, modeName, modelLabel } from './settings.js';
 import { sanitizeTeam, teamName } from './team.js';
 
@@ -26,7 +27,7 @@ const STARTERS = [
 ];
 
 // ------------------------------------------------------------------ boot
-let account;
+let account, layout;
 async function init() {
   applyTheme(store.get('sh.theme', null)); applyDisplay();
   try {
@@ -42,7 +43,7 @@ async function init() {
   if (!b.has_key) banner('No OpenRouter key is set on the server. Add OPENROUTER_API_KEY to the .env file and restart.');
   const sync = b.catalog_sync || {};
   $('#sync-note').textContent = sync.error ? 'Prices: built-in table (live sync unavailable)' : sync.at ? 'Prices: live from OpenRouter' : 'Prices: built-in table';
-  paintChips(); wireStatic(); scheduleEstimate();
+  layout = setupLayout(); paintChips(); wireStatic(); scheduleEstimate();
   await refreshChats();
   const resume = store.get('sh.run', null);
   const last = store.get('sh.conv', null);
@@ -50,7 +51,6 @@ async function init() {
   else if (last) await openConversation(last);
   else showWelcome();
   files.refresh(app.convId);
-  if (matchMedia('(max-width: 1100px)').matches) $('#app').dataset.files = 'closed';
 }
 
 function sanitizeSettings() {
@@ -77,7 +77,7 @@ function banner(text) { const el = $('#banner'); el.textContent = text; el.hidde
 
 // ------------------------------------------------------------------ wallet and plan
 function paintWallet(w) {
-  $('#wallet-bal').textContent = w.available; $('#pill-bal').textContent = w.available;
+  $('#wallet-bal').textContent = w.available.toLocaleString('en'); $('#pill-bal').textContent = w.available.toLocaleString('en');
   $('#wallet-held').textContent = w.held ? `${w.held} on hold` : '';
   app.available = w.available;
 }
@@ -92,7 +92,7 @@ function paintAccount() {
 function paintPlan() {
   const b = app.boot;
   $('#plan-badge').textContent = b.user.plan;
-  $('#wallet-dev').hidden = !b.dev_mode;
+  $('#wallet-dev').hidden = !b.dev_mode || b.unlock_all;
   $('#dev-plan').value = b.user.plan;
 }
 async function refreshWallet() { try { paintWallet(await api('/api/wallet')); } catch { /* shown next time */ } }
@@ -332,12 +332,15 @@ function scrollDown(force) {
 
 // ------------------------------------------------------------------ composer: chips, estimate, attachments
 function paintChips() {
-  const b = app.boot;
+  const b = app.boot, m = currentMode(b, S);
   const chip = (label, value, focus, cls = '') => h('button', { type: 'button', class: `chip ${cls}`, onclick: () => openSettings(focus) }, `${label}: `, h('b', { text: value }));
+  const brain = Object.keys(S.brains).length ? 'Custom' : 'Auto';
   $('#chips').replaceChildren(
     chip('Mode', modeName(b, S), 'mode'),
+    chip('Brains', brain, 'brains', 'hide-m'),
     chip('Team', teamName(S.team), 'team'),
-    chip('Tools', String(S.tools.length), 'tools'),
+    chip('Effort', b.efforts.find((e) => e.id === S.effort)?.label || 'Auto', 'effort', 'hide-m'),
+    chip('Tools', String(S.tools.length), 'tools', 'hide-m'),
     h('button', { type: 'button', class: 'chip', onclick: () => openSettings('mode'), 'aria-label': 'All settings', text: '⚙ Settings' }));
 }
 
@@ -374,6 +377,7 @@ function hideSheet(id) { const s = $(id); s.hidden = true; s._prev?.focus?.(); }
 function openSettings(focus) {
   const body = buildSettings(app.boot, S, { focus, display, onDisplay: applyDisplay, onChange: () => { persist(); paintChips(); scheduleEstimate(); } });
   $('#settings-body').replaceChildren(body);
+  $('#settings .sheet-card').classList.add('settings-card');
   showSheet('#settings');
 }
 
@@ -412,9 +416,9 @@ async function showCredits() {
 
 // ------------------------------------------------------------------ panels
 function closeSide() { delete $('#app').dataset.side; $('#scrim').hidden = true; }
-function openFilesPanel() { $('#app').dataset.files = 'open'; $('#files-toggle').setAttribute('aria-expanded', 'true'); if (matchMedia('(max-width: 1100px)').matches) $('#scrim').hidden = false; }
+function openFilesPanel() { layout.openFiles(); }
 function openFilesPanelSoft() { if (!matchMedia('(max-width: 1100px)').matches) openFilesPanel(); }
-function closeFilesPanel() { $('#app').dataset.files = 'closed'; $('#files-toggle').setAttribute('aria-expanded', 'false'); $('#scrim').hidden = true; }
+function closeFilesPanel() { layout.closeFiles(); }
 
 function applyDisplay() {
   const r = document.documentElement;
@@ -451,9 +455,7 @@ function wireStatic() {
   $('#open-side').addEventListener('click', () => { $('#app').dataset.side = 'open'; $('#scrim').hidden = false; });
   $('#close-side').addEventListener('click', closeSide);
   $('#scrim').addEventListener('click', () => { closeSide(); if (matchMedia('(max-width: 1100px)').matches) closeFilesPanel(); });
-  $('#files-toggle').addEventListener('click', () => ($('#app').dataset.files === 'open' ? closeFilesPanel() : openFilesPanel()));
   $('#open-files-btn').addEventListener('click', () => { closeSide(); openFilesPanel(); files.refresh(null); });
-  $('#close-files').addEventListener('click', closeFilesPanel);
   $('#settings-close').addEventListener('click', () => hideSheet('#settings'));
   $('#dialog-close').addEventListener('click', () => hideSheet('#dialog'));
   for (const id of ['#settings', '#dialog']) $(id).addEventListener('click', (e) => { if (e.target === $(id)) hideSheet(id); });

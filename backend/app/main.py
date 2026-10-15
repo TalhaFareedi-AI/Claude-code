@@ -190,7 +190,7 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
             "wallet": {"balance": wallet.balance(db, user["id"]), "held": wallet.held(db, user["id"]),
                        "available": wallet.available(db, user["id"])},
             "plans": {p["id"]: {"name": p["name"], "credits": p["credits"], "price": p["price_usd"], "rules": plans.rules(p["id"])}
-                      for p in plans.all_plans() if p["kind"] == "subscription"},
+                      for p in plans.all_plans(True) if p["kind"] == "subscription"},
             "modes": plan_modes(user),
             "models": models,
             "efforts": efforts,
@@ -198,6 +198,7 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
             "skills": [{"name": s.name, "description": s.description} for s in skills.all_skills().values()],
             "roles": ROLE_LABELS,
             "dev_mode": settings.dev_mode,
+            "unlock_all": settings.unlock_all,
             "has_key": bool(llm.api_key),
             "catalog_sync": app.state.last_sync,
         }

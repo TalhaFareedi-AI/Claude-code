@@ -9,6 +9,8 @@ os.environ.update(NO_AUTO_APP="1", DEV_MODE="1", BRAIN_POLICY="cheap", ADMIN_EMA
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+os.environ.setdefault("UNLOCK_ALL", "0")  # tests use normal plan rules unless asked (UNLOCK_ALL=1 python demo_server.py)
+
 import uvicorn
 
 from app.config import settings

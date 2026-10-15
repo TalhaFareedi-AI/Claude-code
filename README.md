@@ -132,3 +132,17 @@ Users see, edit, pin, search, delete or switch off memory. Passwords, keys and c
 
 Run `python -m pytest` (192 tests), then `python backend/tests/demo_server.py` and
 `node scripts/platform_ui_check.cjs` (23 browser checks for sign-up, memory, plans and the admin console).
+
+
+## Screen layout and settings
+
+- **Side panels:** drag the edge of the sidebar or the workspace with the mouse to resize (double-click resets,
+  arrow keys work too). Drag the sidebar far left, or click «, to shrink it to icons. Sizes are remembered.
+- **Workspace:** the "Workspace" button in the top bar opens it, and its ✕ closes it. It opens by itself when the AI makes a file.
+- **Settings** is a tabbed panel: Mode, Brains (with a quick pick: Auto, Cheapest, Balanced, Strongest), Planning,
+  Research, Build and check, Effort and limits, Tools and skills, Display. The chips above the message box open the matching tab.
+- **Owner mode:** `UNLOCK_ALL=1` in `.env` gives every visitor the hidden Owner plan (all modes, brains, max effort,
+  100,000 credits). Good while you are the only user. Set it to 0 before real users arrive.
+
+Browser checks: `node scripts/layout_ui_check.cjs` (24, start the server with `UNLOCK_ALL=1`), `scripts/ui_check.cjs` (19),
+`scripts/platform_ui_check.cjs` (23), `scripts/team_ui_check.cjs` (15). Unit tests: `python -m pytest` (194).

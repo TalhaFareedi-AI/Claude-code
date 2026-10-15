@@ -402,3 +402,27 @@ async def test_login_cookie_user_cannot_read_another_users_blueprint(api, db):
         theirs = (await b.get("/api/me/blueprint")).json()["user"]["id"]
         assert mine != theirs
         assert (await a.get(f"/api/admin/users/{theirs}")).status_code == 403
+
+
+# ---------------------------------------------------------------- owner mode (UNLOCK_ALL)
+async def test_unlock_all_gives_the_owner_everything(api, db, monkeypatch):
+    monkeypatch.setattr(settings, "unlock_all", True)
+    async with client(api) as c:
+        h = {"x-user-id": "u_owner1"}
+        boot = (await c.get("/api/bootstrap", headers=h)).json()
+        assert boot["user"]["plan"] == "owner" and boot["unlock_all"] is True
+        assert boot["wallet"]["balance"] >= 100000
+        assert all(m["allowed"] for m in boot["modes"]) and len(boot["modes"]) == 10
+        assert all(e["allowed"] for e in boot["efforts"]) and all(m["allowed"] for m in boot["models"])
+        assert boot["plans"]["owner"]["rules"]["max_effort"] == "max"
+        # it is hidden from the store, and a Pro-only mode really runs
+        assert "owner" not in [p["id"] for p in (await c.get("/api/plans", headers=h)).json()["plans"]]
+    tid, ev = await run(api.state.harness, "u_owner1", message="explain gravity", mode="council", confirm=True)
+    assert last(ev, "run_done")["status"] == "done"
+
+
+async def test_without_unlock_all_the_plan_limits_still_apply(api, db):
+    async with client(api) as c:
+        boot = (await c.get("/api/bootstrap", headers={"x-user-id": "u_plain01"})).json()
+        assert boot["user"]["plan"] == "free" and not boot["unlock_all"]
+        assert not next(m for m in boot["modes"] if m["id"] == "council")["allowed"]

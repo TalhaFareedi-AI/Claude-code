@@ -50,13 +50,13 @@ const email = `sam${Date.now()}@example.com`;
   await user.click('#buy-credits'); await user.waitForSelector('.plan-card');
   check('plans and packs are shown', (await user.locator('.plan-card').count()) >= 5);
   await user.screenshot({ path: `${SHOTS}/31-plans.png` });
-  const before = Number(await user.locator('#wallet-bal').innerText());
+  const before = Number((await user.locator('#wallet-bal').innerText()).replace(/,/g, ''));
   await Promise.all([user.waitForNavigation(), user.locator('.plan-card:has(h3:text-is("Student")) button').click()]);
   await user.waitForFunction(() => document.querySelector('#wallet-bal').textContent !== '–');
-  check('buying Student switches plan and adds credits', (await user.locator('#plan-badge').innerText()).toLowerCase() === 'student' && Number(await user.locator('#wallet-bal').innerText()) > before);
+  check('buying Student switches plan and adds credits', (await user.locator('#plan-badge').innerText()).toLowerCase() === 'student' && Number((await user.locator('#wallet-bal').innerText()).replace(/,/g, '')) > before);
   await user.click('#buy-credits'); await user.waitForSelector('.plan-card');
   await user.locator('.plan-card:has(h3:text-is("Top-up 800")) button').click();
-  await user.waitForFunction((b) => Number(document.querySelector('#wallet-bal').innerText) >= b + 800, Number(await user.locator('#wallet-bal').innerText()), { timeout: 8000 }).catch(() => {});
+  await user.waitForFunction((b) => Number(document.querySelector('#wallet-bal').innerText.replace(/,/g, '')) >= b + 800, Number((await user.locator('#wallet-bal').innerText()).replace(/,/g, '')), { timeout: 8000 }).catch(() => {});
   await user.click('#dialog-close');
 
   // 4. my activity

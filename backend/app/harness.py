@@ -20,6 +20,7 @@ from .config import settings
 from .db import DB, jdump, jload, now
 from .estimate import estimate
 from .openrouter import LLMResult, OpenRouter, OpenRouterError, build_reasoning
+from . import plans as plans_mod
 from .plans import rules as plan_rules
 from .pricing import EFFORT_ORDER, call_cost, clamp_effort, credits_for_cost
 from .tools import calc as calc_tool, diagram
@@ -527,7 +528,14 @@ class Harness:
             self.db.run("UPDATE users SET plan_renews_at=? WHERE id=?", (now() + 30 * 86400, user_id))
             activity.log(self.db, user_id, "account_created", plan="free")
             u = self.db.one("SELECT * FROM users WHERE id=?", (user_id,))
-        elif u.get("plan_renews_at") and u["plan_renews_at"] < now():
+        if settings.unlock_all and u["plan"] != "owner":
+            self.db.run("UPDATE users SET plan='owner', plan_renews_at=NULL WHERE id=?", (user_id,))
+            top_up = plans_mod.OWNER_CREDITS - wallet.balance(self.db, user_id)
+            if top_up > 0:
+                wallet.add(self.db, user_id, top_up, "owner:credits")
+            activity.log(self.db, user_id, "plan_changed", plan="owner", via="UNLOCK_ALL")
+            u = self.db.one("SELECT * FROM users WHERE id=?", (user_id,))
+        elif u.get("plan_renews_at") and u["plan_renews_at"] < now() and u["plan"] != "owner":
             from . import billing
             billing.renew(self.db, u)
             u = self.db.one("SELECT * FROM users WHERE id=?", (user_id,))

@@ -10,25 +10,26 @@
 </head>
 <body>
 <a class="skip" href="#composer-text">Skip to message box</a>
-<div id="app" class="app" data-files="open">
+<div id="app" class="app" data-files="closed">
   <div class="scrim" id="scrim" hidden></div>
 
   <aside class="sidebar" id="sidebar" aria-label="Sidebar">
     <div class="side-head">
       <div class="brand"><span class="logo" aria-hidden="true"></span><span id="brand-name">Study Harness</span></div>
+      <button class="icon-btn no-mobile" id="collapse-side" aria-label="Minimize sidebar" title="Minimize sidebar">«</button>
       <button class="icon-btn only-mobile" id="close-side" aria-label="Close menu">✕</button>
     </div>
-    <button class="btn primary block" id="new-chat">＋ New chat</button>
+    <button class="btn primary block" id="new-chat" title="New chat"><span class="ico">＋</span><span class="lbl"> New chat</span></button>
     <nav class="side-section grow" aria-label="Chats">
       <h2 class="side-title">Chats</h2>
       <ul class="chat-list" id="chat-list"></ul>
       <p class="muted small" id="chat-empty">Your chats show up here.</p>
     </nav>
     <div class="side-section">
-      <button class="side-link" id="open-profile">🧠 Memory</button>
-      <button class="side-link" id="open-activity">📊 My activity</button>
-      <button class="side-link" id="open-files-btn">📁 My files</button>
-      <a class="side-link" id="admin-link" href="/admin.html" hidden>🛡️ Admin console</a>
+      <button class="side-link" id="open-profile"title="Memory"><span class="ico">🧠</span><span class="lbl">Memory</span></button>
+      <button class="side-link" id="open-activity"title="My activity"><span class="ico">📊</span><span class="lbl">My activity</span></button>
+      <button class="side-link" id="open-files-btn"title="My files"><span class="ico">📁</span><span class="lbl">My files</span></button>
+      <a class="side-link" id="admin-link" href="/admin.html" hidden title="Admin console"><span class="ico">🛡️</span><span class="lbl">Admin console</span></a>
     </div>
     <div class="account-box" id="account-box">
       <div class="small"><b id="acct-name">Guest</b><br><span class="muted tiny" id="acct-email">Not signed in</span></div>
@@ -37,7 +38,7 @@
     <div class="wallet" id="wallet" aria-live="polite">
       <div class="wallet-top"><span class="plan-badge" id="plan-badge">free</span><span class="muted small" id="wallet-held"></span></div>
       <div class="wallet-bal"><strong id="wallet-bal">–</strong> <span class="muted">credits</span></div>
-      <button class="btn small block" id="buy-credits">💳 Plans &amp; credits</button>
+      <button class="btn small block" id="buy-credits" title="Plans &amp; credits"><span class="ico">💳</span><span class="lbl"> Plans &amp; credits</span></button>
       <div class="wallet-dev" id="wallet-dev" hidden>
         <label class="small muted" for="dev-plan">Test as plan</label>
         <select id="dev-plan" class="select small"><option>free</option><option>student</option><option>pro</option><option>school</option></select>
@@ -45,7 +46,7 @@
       </div>
     </div>
     <div class="side-foot">
-      <button class="side-link" id="theme-toggle" aria-label="Switch light or dark">🌓 Theme</button>
+      <button class="side-link" id="theme-toggle" aria-label="Switch light or dark" title="Theme"><span class="ico">🌓</span><span class="lbl">Theme</span></button>
       <p class="muted tiny" id="sync-note"></p>
     </div>
   </aside>
@@ -56,7 +57,7 @@
       <h1 class="topbar-title" id="chat-title">New chat</h1>
       <div class="topbar-right">
         <span class="credit-pill" id="credit-pill" title="Credits left">◎ <b id="pill-bal">–</b></span>
-        <button class="btn small files-toggle" id="files-toggle" aria-expanded="true" aria-controls="files-panel">Files <span class="count" id="files-count">0</span></button>
+        <button class="btn small files-toggle" id="files-toggle" aria-expanded="false" aria-controls="files-panel" title="Show or hide your workspace">📁 Workspace <span class="count" id="files-count">0</span></button>
       </div>
     </header>
 
@@ -82,10 +83,12 @@
     </form>
   </main>
 
+  <div class="resizer" id="side-resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar (drag, or use the arrow keys; double-click to reset)" tabindex="0"></div>
+  <div class="resizer" id="files-resizer" role="separator" aria-orientation="vertical" aria-label="Resize workspace (drag, or use the arrow keys; double-click to reset)" tabindex="0"></div>
   <aside class="files" id="files-panel" aria-label="Files">
     <div class="files-head">
       <div><h2 class="side-title" id="ws-name">Workspace</h2><div class="meter" aria-hidden="true"><i id="ws-meter"></i></div><p class="muted tiny" id="ws-usage"></p></div>
-      <button class="icon-btn only-mobile" id="close-files" aria-label="Close files">✕</button>
+      <button class="icon-btn" id="close-files" aria-label="Close workspace" title="Close workspace">✕</button>
     </div>
     <ul class="file-list" id="file-list"></ul>
     <p class="muted small" id="files-empty">Files the AI makes land here, with Open and Download.</p>

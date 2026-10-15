@@ -4,7 +4,7 @@ import { api } from './api.js';
 import { renderSvg } from './charts.js';
 
 const ICON = { pptx: '📊', docx: '📝', svg: '🖼️', pdf: '📕', txt: '📄' };
-const size = (n) => (n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n > 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
+const size = (n) => (n > 1073741824 ? `${(n / 1073741824).toFixed(1)} GB` : n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n > 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
 
 export class FilesPanel {
   constructor() { this.list = $('#file-list'); this.empty = $('#files-empty'); this.preview = $('#preview'); this.count = $('#files-count'); this.refreshSeq = 0; this.previewSeq = 0; }

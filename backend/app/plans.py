@@ -59,6 +59,28 @@ def bind(db: DB, mode_rows: list[dict] | None = None) -> None:
                     rules["modes"] = [m["id"] for m in mode_rows if pid in m.get("plans", [])]
             db.run("INSERT INTO plans(id,name,kind,price_usd,credits,period_days,benefits,rules,active,sort,updated_at) "
                    "VALUES(?,?,?,?,?,?,?,?,1,?,?)", (pid, name, kind, price, credits, days, jdump(benefits), jdump(rules), n, now()))
+    ensure_owner(db, mode_rows)
+
+
+OWNER_ID = "owner"
+OWNER_CREDITS = 100_000
+
+
+def ensure_owner(db: DB, mode_rows: list[dict] | None = None) -> None:
+    """The hidden Owner plan: everything unlocked. Used when UNLOCK_ALL=1 (one-person setups)."""
+    rules = {"tiers": ["quick", "smart", "genius"], "max_rounds": 5, "max_tries": 5, "charts_per_day": 100000, "retention_days": 365,
+             "storage_mb": 100000, "mcp": True, "images": True, "private_default": False, "max_effort": "max",
+             "daily_credit_cap": 10_000_000}
+    if mode_rows is not None:
+        rules["modes"] = [m["id"] for m in mode_rows]
+    row = db.one("SELECT id FROM plans WHERE id=?", (OWNER_ID,))
+    if row:
+        db.run("UPDATE plans SET rules=? WHERE id=?", (jdump(rules), OWNER_ID))
+    else:
+        db.run("INSERT INTO plans(id,name,kind,price_usd,credits,period_days,benefits,rules,active,sort,updated_at) "
+               "VALUES(?,?,?,?,?,?,?,?,0,99,?)",
+               (OWNER_ID, "Owner", "subscription", 0, OWNER_CREDITS, 3650, jdump(["Everything unlocked"]), jdump(rules), now()))
+    invalidate()
 
 
 def invalidate() -> None:

@@ -67,6 +67,8 @@ class Settings:
         self.admin_password = _env("ADMIN_PASSWORD")
         # test = a purchase is paid at once (no real money). manual = pending until an admin marks it paid.
         self.payment_provider = _env("PAYMENT_PROVIDER", "test" if _env("DEV_MODE", "0") == "1" else "manual")
+        # Owner mode: every user gets the Owner plan (all modes, brains, effort, huge limits). For a one-person setup.
+        self.unlock_all = _env("UNLOCK_ALL", "0") == "1"
         self.app_title = _env("APP_TITLE", "Study Harness")
 
 
