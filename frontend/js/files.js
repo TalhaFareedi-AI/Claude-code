@@ -7,16 +7,19 @@ const ICON = { pptx: '📊', docx: '📝', svg: '🖼️', pdf: '📕', txt: '�
 const size = (n) => (n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n > 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
 
 export class FilesPanel {
-  constructor() { this.list = $('#file-list'); this.empty = $('#files-empty'); this.preview = $('#preview'); this.count = $('#files-count'); }
+  constructor() { this.list = $('#file-list'); this.empty = $('#files-empty'); this.preview = $('#preview'); this.count = $('#files-count'); this.refreshSeq = 0; this.previewSeq = 0; }
 
   async refresh(convId) {
+    const seq = ++this.refreshSeq;
+    if (this.convId !== convId) { this.convId = convId; this.previewSeq++; this.preview.hidden = true; }
     try {
       const r = await api(convId ? `/api/files?conversation_id=${encodeURIComponent(convId)}` : '/api/files');
+      if (seq !== this.refreshSeq) return;
       $('#ws-name').textContent = r.workspace_name;
       $('#ws-meter').style.width = `${Math.min(100, (r.used_bytes / r.limit_bytes) * 100)}%`;
       $('#ws-usage').textContent = `${size(r.used_bytes)} of ${size(r.limit_bytes)} used`;
       this.render(r.files);
-    } catch (e) { toast(e.message); }
+    } catch (e) { if (seq === this.refreshSeq) toast(e.message); }
   }
 
   render(files) {
@@ -31,14 +34,16 @@ export class FilesPanel {
   }
 
   async open(f) {
+    const seq = ++this.previewSeq;
     try {
       const p = await api(`/api/files/${f.id}/preview`);
+      if (seq !== this.previewSeq) return;
       this.preview.hidden = false;
       if (p.kind === 'svg') this.preview.replaceChildren(h('h3', { text: f.name }), renderSvg(p.svg));
       else if (p.items) this.preview.replaceChildren(h('h3', { text: p.title || f.name }), ...p.items.map((it, k) => h('div', { class: 'slide' }, h('b', { text: `${k + 1}. ${it.title || ''}` }), it.lines?.length ? h('ul', null, it.lines.map((l) => h('li', { text: String(l) }))) : null)));
       else this.preview.replaceChildren(h('p', { class: 'muted', text: p.note || 'No preview. Use Download.' }));
       this.preview.scrollIntoView({ block: 'nearest' });
-    } catch (e) { toast(e.message); }
+    } catch (e) { if (seq === this.previewSeq) toast(e.message); }
   }
 
   async download(f) {

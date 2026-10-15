@@ -1,5 +1,7 @@
 """FastAPI app. Web and phone app both read the same lists (modes, models) from here."""
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -41,8 +43,13 @@ ROLE_LABELS = {"answer": "Answerer", "write": "Writer", "critic": "Critic", "thi
 class ChatBody(BaseModel):
     message: str = Field("", max_length=12000)
     conversation_id: str | None = None
+    request_id: str | None = Field(None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     mode: str = "auto"
     brains: dict = Field(default_factory=dict)
+    team: dict = Field(default_factory=dict)
+    teacher_enabled: bool = True
+    teacher_model: str | None = Field(None, max_length=200)
+    approved_plan: list[dict] | None = Field(None, max_length=12)
     effort: str = "auto"
     rounds: int | None = None
     tries: int | None = None
@@ -78,6 +85,7 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        harness.recover_interrupted()
         async def nightly():
             while True:
                 try:
@@ -107,7 +115,10 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
 
     # ---- who is this -------------------------------------------------------------------
     def who(request: Request, response: Response | None = None) -> dict:
-        uid = request.cookies.get("uid")
+        cookie = request.cookies.get("uid", "")
+        raw_uid, _, signature = cookie.partition(".")
+        expected = hmac.new(settings.secret.encode(), raw_uid.encode(), hashlib.sha256).hexdigest()
+        uid = raw_uid if re.fullmatch(r"[a-f0-9]{64}", signature) and hmac.compare_digest(signature, expected) else None
         if settings.dev_mode and request.headers.get("x-user-id"):
             uid = request.headers["x-user-id"]
         if not uid or not re.fullmatch(r"u_[A-Za-z0-9_-]{4,40}", uid):
@@ -120,7 +131,9 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         resp = await call_next(request)
         uid = getattr(request.state, "new_uid", None)
         if uid:
-            resp.set_cookie("uid", uid, max_age=365 * 86400, httponly=True, samesite="lax")
+            signature = hmac.new(settings.secret.encode(), uid.encode(), hashlib.sha256).hexdigest()
+            resp.set_cookie("uid", uid + "." + signature, max_age=365 * 86400, httponly=True,
+                            secure=request.url.scheme == "https", samesite="lax")
         return resp
 
     def plan_modes(user: dict) -> list[dict]:
@@ -173,13 +186,16 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         try:
             mode = harness.choose_mode(req, route, user["plan"])
             ctx = RunContext(harness, user, task, req, mode, NullEmitter())
+            ctx.intent = route["intent"]
+            ctx.needs = route.get("needs", [])
             est = harness.make_estimate(ctx, route)
         except (UserError, LookupError) as e:
             raise HTTPException(400, str(e))
         cap = req.max_credits or min(mode["max_credits"], max(user["auto_spend"], est["credits"]))
+        max_cap = min(mode["max_credits"], ctx.team.get("max_credits") or mode["max_credits"])
         brains = {r: [m["name"] for m in ctx.brains(r)] for r in mode["slots"]}
         return {"mode": mode["id"], "mode_name": mode["name"], "credits": est["credits"], "usd": est["usd"],
-                "cap": max(1, min(cap, mode["max_credits"])), "max_cap": mode["max_credits"], "big": mode["big"],
+                "cap": max(1, min(cap, max_cap)), "max_cap": max_cap, "big": mode["big"],
                 "needs_confirm": mode["big"] and est["credits"] > user["auto_spend"], "brains": brains,
                 "rounds": est.get("rounds"), "tries": est.get("tries"), "parts": est["parts"]}
 
@@ -188,7 +204,9 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
                           max_credits=b.max_credits, tools=b.tools if b.tools is not None else [t["id"] for t in TOOLS if t["default"]],
                           skills=b.skills, intent=b.intent, conversation_id=b.conversation_id, confirm=b.confirm,
                           continue_task=b.continue_task, extra_credits=b.extra_credits, private_route=b.private_route,
-                          target_message=b.target_message, uploads=b.uploads)
+                          target_message=b.target_message, uploads=b.uploads, team=b.team,
+                          teacher_enabled=b.teacher_enabled, teacher_model=b.teacher_model, approved_plan=b.approved_plan,
+                          request_id=b.request_id)
 
     # ---- chat: a stream of small events -----------------------------------------------------------------
     @app.post("/api/chat")
@@ -205,7 +223,10 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         req = to_request(body)
         if body.continue_task and not body.message.strip():
             req.message = "Continue the task."
-        task_id, em = await harness.start(user["id"], req)
+        try:
+            task_id, em = await harness.start(user["id"], req)
+        except UserError as exc:
+            raise HTTPException(400, str(exc))
 
         async def gen():
             yield sse({"seq": 0, "type": "hello", "task_id": task_id, "conversation_id": req.conversation_id})

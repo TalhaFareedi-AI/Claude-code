@@ -291,12 +291,15 @@ async def test_docx_builds(harness, fake, db, tmp_path):
     assert len(Document(str(path)).paragraphs) > 5
 
 
-async def test_research_uses_web_plugin(harness, fake, db):
+async def test_research_uses_bounded_web_tool_with_citations(harness, fake, db):
     harness.get_user("u_r")
     db.run("UPDATE users SET plan='student' WHERE id='u_r'")
     topup(db, "u_r")
-    tid, ev = await go(harness, "u_r", message="research the latest news about solar panels", mode="research", confirm=True)
-    assert [r for r in fake.requests if r.get("plugins")]
+    tid, ev = await go(harness, "u_r", message="research the latest news about solar panels", mode="research", confirm=True, tools=["web"])
+    requests = [r for r in fake.requests if r.get("tools")]
+    assert requests and not any(r.get("plugins") for r in requests)
+    assert all(r["tools"][0]["type"] == "openrouter:web_search" and r["max_tool_calls"] == 2 for r in requests)
+    assert any(e["type"] == "sources" and e["sources"][0]["url"] == "https://example.com" for e in ev)
     assert "example.com" in answer_text(ev)
 
 

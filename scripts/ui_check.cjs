@@ -70,13 +70,14 @@ const check = (name, ok, extra = '') => { results.push({ name, ok }); console.lo
   await page.click('#settings-close');
   await page.fill('#composer-text', 'Make a 5 slides PPT on plants');
   await page.click('#send-btn');
-  await page.waitForSelector('.file .name', { timeout: 25000 });
+  await page.locator('.file .name').filter({ hasText: /\.pptx$/i }).first().waitFor({ state: 'visible', timeout: 25000 });
   await page.waitForFunction(() => !document.querySelector('.run.working'), null, { timeout: 25000 });
-  check('PPT file card appears with Open and Download', /pptx/.test(await page.locator('.file .name').first().innerText()) && await page.locator('.file button:has-text("Download")').count() >= 1);
-  await page.locator('.file button:has-text("Open")').first().click();
+  const pptFile = page.locator('.file').filter({ has: page.locator('.name').filter({ hasText: /\.pptx$/i }) }).first();
+  check('PPT file card appears with Open and Download', /pptx/.test(await pptFile.locator('.name').innerText()) && await pptFile.locator('button:has-text("Download")').count() === 1);
+  await pptFile.locator('button:has-text("Open")').click();
   await page.waitForSelector('#preview:not([hidden]) .slide');
   check('Open shows a slide preview', (await page.locator('#preview .slide').count()) >= 3);
-  const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('.file button:has-text("Download")').first().click()]);
+  const [dl] = await Promise.all([page.waitForEvent('download'), pptFile.locator('button:has-text("Download")').click()]);
   check('Download works through a signed link', /\.pptx$/.test(dl.suggestedFilename()));
   await page.screenshot({ path: `${SHOTS}/06-files.png` });
 

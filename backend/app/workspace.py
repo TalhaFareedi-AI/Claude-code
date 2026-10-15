@@ -113,14 +113,27 @@ def cleanup_work(user_id: str, task_id: str) -> None:
 
 
 def purge_expired(db: DB) -> int:
+    """Remove expired registered files from their actual task folders.
+
+    Keep a record when a file cannot be removed, so the next maintenance run
+    retries it rather than making retained bytes invisible to storage limits.
+    """
     rows = db.all("SELECT * FROM workspace_files WHERE delete_after < ?", (now(),))
+    removed = 0
     for r in rows:
         try:
-            safe_path(r["user_id"], *[p for p in Path(r["path"]).parts]).unlink(missing_ok=True)
+            # Paths are relative to the task folder, not to the user's root.
+            # A newer registration may still retain the same physical file.
+            retained = db.one("SELECT id FROM workspace_files WHERE user_id=? AND task_id=? AND path=? "
+                              "AND delete_after >= ? LIMIT 1",
+                              (r["user_id"], r["task_id"], r["path"], now()))
+            if not retained:
+                path_of(r).unlink(missing_ok=True)
         except (PathEscape, OSError):
-            pass
+            continue
         db.run("DELETE FROM workspace_files WHERE id=?", (r["id"],))
-    return len(rows)
+        removed += 1
+    return removed
 
 
 def delete_all(db: DB, user_id: str) -> None:

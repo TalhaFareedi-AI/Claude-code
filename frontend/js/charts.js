@@ -4,19 +4,38 @@ import { h, svg, fmtNum } from './dom.js';
 import { compile } from './formula.js';
 
 const COLORS = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--c4)', 'var(--c5)', 'var(--c6)'];
-let W = 640, H = 320;                       // set on every draw from the real width, so text stays readable on phones
 const M = { l: 56, r: 14, t: 14, b: 38 };
 
 function niceTicks(lo, hi, n = 5) {
-  if (!(hi > lo)) { hi = lo + 1; }
-  const step0 = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
+  if (!(hi > lo)) {
+    const pad = Math.abs(lo) * 0.05 || 1;
+    const lower = lo - pad, upper = hi + pad;
+    if (Number.isFinite(lower)) lo = lower;
+    if (Number.isFinite(upper)) hi = upper;
+  }
+  const span = hi - lo, step0 = span / n;
+  // Finite recipes may have an overflowing range, or a range smaller than one
+  // representable tick at this magnitude. Endpoints give those ranges a scale.
+  if (!Number.isFinite(span) || !(step0 > 0)) return [lo, hi];
+  const mag = Math.pow(10, Math.floor(Math.log10(step0)));
   const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= step0) || 10 * mag;
+  if (!Number.isFinite(step) || !(step > 0)) return [lo, hi];
   const start = Math.floor(lo / step) * step, out = [];
-  for (let v = start; v <= hi + step * 0.5; v += step) out.push(+v.toPrecision(12));
-  return out;
+  // Never increment a float until it passes a bound: v + step can equal v and
+  // freeze the tab. Index-based ticks also keep ordinary ranges evenly spaced.
+  for (let k = 0; k < 32; k++) {
+    const v = start + k * step;
+    if (!Number.isFinite(v) || (out.length && v <= out[out.length - 1])) return [lo, hi];
+    out.push(v);
+    if (v >= hi) return out.length > 1 ? out : [lo, hi];
+  }
+  return [lo, hi];
 }
 
 export function renderChart(recipe) {
+  // Each chart owns its geometry, including the closures used by hover events.
+  let W = 640, H = 320;
   const inputs = recipe.inputs || [];
   const values = Object.fromEntries(inputs.map((i) => [i.id, i.value]));
   const isCat = recipe.chart === 'bar' || recipe.chart === 'pie';
@@ -66,7 +85,7 @@ export function renderChart(recipe) {
     let lo, hi;
     try { lo = xFrom(values); hi = xTo(values); } catch { lo = 0; hi = 1; }
     if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) { lo = 0; hi = 1; }
-    const xs = Array.from({ length: steps + 1 }, (_, k) => lo + ((hi - lo) * k) / steps);
+    const xs = Array.from({ length: steps + 1 }, (_, k) => lo * (1 - k / steps) + hi * (k / steps));
     const series = lines.map((l) => ({ name: l.name, vals: xs.map((x) => { try { return l.f({ ...values, x }); } catch { return NaN; } }) }));
     return { xs, series };
   }
@@ -87,7 +106,11 @@ export function renderChart(recipe) {
     if (!all.length) { lo = 0; hi = 1; }
     if (recipe.chart === 'bar' || recipe.chart === 'area') lo = Math.min(lo, 0);
     const yt = niceTicks(lo, hi), y0 = yt[0], y1 = yt[yt.length - 1];
-    const px = (v, a, b, lo2, hi2) => a + ((v - lo2) / (hi2 - lo2 || 1)) * (b - a);
+    const px = (v, a, b, lo2, hi2) => {
+      const span = hi2 - lo2;
+      const ratio = Number.isFinite(span) ? (v - lo2) / (span || 1) : (v / 2 - lo2 / 2) / (hi2 / 2 - lo2 / 2);
+      return a + ratio * (b - a);
+    };
     const Y = (v) => px(v, H - M.b, M.t, y0, y1);
     for (const t of yt) {
       root.append(svg('line', { class: 'grid', x1: M.l, x2: W - M.r, y1: Y(t), y2: Y(t) }));

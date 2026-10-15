@@ -24,7 +24,7 @@ from app import catalog, modes, wallet  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db import DB  # noqa: E402
 from app.harness import Harness, RunRequest  # noqa: E402
-from app.openrouter import OpenRouter, OpenRouterError  # noqa: E402
+from app.openrouter import OpenRouter, OpenRouterError, build_reasoning  # noqa: E402
 from app.pricing import call_cost  # noqa: E402
 
 OK, BAD = "\033[32mPASS\033[0m", "\033[31mFAIL\033[0m"
@@ -37,9 +37,8 @@ def check(name, ok, extra=""):
         failures.append(name)
 
 
-async def main(quick: bool) -> int:
+async def checks(quick: bool, llm: OpenRouter) -> int:
     settings.workspace_root = Path(tempfile.mkdtemp())
-    llm = OpenRouter()
     if not llm.api_key:
         print("Set OPENROUTER_API_KEY first (in .env).")
         return 2
@@ -47,7 +46,7 @@ async def main(quick: bool) -> int:
     # 1. Is the key valid?
     try:
         info = await llm.key_info()
-        check("key is valid", True, f"label={info.get('label')} usage=${info.get('usage')} limit={info.get('limit')}")
+        check("key is valid", True)
     except OpenRouterError as e:
         check("key is valid", False, str(e))
         return 1
@@ -76,7 +75,9 @@ async def main(quick: bool) -> int:
 
     # 3. One real call: does usage.cost match tokens x listed price?  (proves the money math)
     cheap = catalog.resolve(db, "quick", policy="cheap")
-    res = await llm.chat(cheap["id"], [{"role": "user", "content": "Say hello in 5 words."}], max_tokens=60)
+    res = await llm.chat(cheap["id"], [{"role": "user", "content": "Say hello in 5 words."}], max_tokens=256,
+                         reasoning=build_reasoning(cheap, "off", 256))
+    check("model returned a visible answer", bool(res.text.strip()))
     u = res.usage
     table = call_cost(cheap["price_in"], cheap["price_out"], u.prompt, u.completion, u.cached, cheap.get("price_cached"))
     check("usage.cost is returned", u.cost is not None, f"model={res.model} reply={res.text.strip()[:40]!r}")
@@ -101,12 +102,15 @@ async def main(quick: bool) -> int:
         "think_team": "Why do we have seasons?",
         "research": "What is the tallest building in the world right now?",
         "deep": "Plan and compare two ways to save $100 a month for a year. Use a chart.",
+        "developer": "Design a tiny Python temperature converter. Give validation rules, code and three test cases. Do not claim to execute code.",
     }
     before_total = Decimal(0)
     for mode_id, text in prompts.items():
         mode = modes.get(db, mode_id)
         req = RunRequest(message=text, mode=mode_id, confirm=True, max_credits=min(mode["max_credits"], 40),
-                         rounds=1, tries=2, effort="low")
+                         rounds=1, tries=2, effort="low", tools=["web"] if mode_id == "research" else ["chart", "diagram", "documents", "ppt"],
+                         team={"plan_depth": "light", "researchers": {"count": 2 if mode_id == "research" else 0,
+                               "max_searches_each": 1}, "builder": {"effort": "off"}})
         tid, em = await h.start("live", req)
         events = [e async for e in em.stream()]
         await h.drain()
@@ -126,6 +130,14 @@ async def main(quick: bool) -> int:
     check("ledger matches usage rows", wallet.ledger_mismatches(db) == [])
     print(f"Total AI spend this run: ${float(before_total):.5f}")
     return 1 if failures else 0
+
+
+async def main(quick: bool) -> int:
+    llm = OpenRouter()
+    try:
+        return await checks(quick, llm)
+    finally:
+        await llm.aclose()
 
 
 if __name__ == "__main__":

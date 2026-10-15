@@ -148,6 +148,7 @@ async def finalize(ctx, text: str) -> tuple[str, list[str], list[dict]]:
     text = MARK.sub(lambda m: m.group(0) if m.group(1) in known else "", text)  # drop invented markers
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if not buttons and text:
-        buttons = [b for b in DEFAULT_BUTTONS if b != "Show a graph" or "chart" in ctx.req.tools][:3]
+        defaults = DEFAULT_BUTTONS if ctx.req.teacher_enabled else ["Expand this answer", "Show an example"]
+        buttons = [b for b in defaults if b != "Show a graph" or "chart" in ctx.req.tools][:3]
     ctx.emit("check", ok=True, note="Numbers, charts and pictures were checked." if ctx.artifacts else "Checked.")
     return text, buttons, ctx.artifacts

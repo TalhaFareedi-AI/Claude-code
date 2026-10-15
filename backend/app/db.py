@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS tasks(
   id TEXT PRIMARY KEY, user_id TEXT, conversation_id TEXT, mode TEXT, intent TEXT,
   status TEXT, estimate INTEGER, max_credits INTEGER, credits_used INTEGER DEFAULT 0,
   usd_used REAL DEFAULT 0, config TEXT, state TEXT, created_at REAL, finished_at REAL);
+CREATE TABLE IF NOT EXISTS run_requests(
+  user_id TEXT, request_id TEXT, task_id TEXT, payload_hash TEXT,
+  PRIMARY KEY(user_id,request_id));
 CREATE TABLE IF NOT EXISTS usage_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, task_id TEXT, step_no INTEGER,
   role TEXT, model TEXT, input_tokens INTEGER, cached_tokens INTEGER, output_tokens INTEGER,

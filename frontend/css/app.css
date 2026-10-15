@@ -285,3 +285,28 @@ html[data-anim="off"] .progress.indeterminate::after { display: none; }
 
 .sheet-card.wide { width: min(860px, 100%); }
 .sheet-card.wide .md th, .sheet-card.wide .md td { padding: 4px 8px; font-size: .8125rem; white-space: nowrap; }
+
+/* Team controls stay inside the settings sheet on desktop and phones. */
+.team-settings { display: grid; gap: 12px; min-width: 0; }
+.team-settings p { margin: 0; }
+.team-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.team-field { display: grid; gap: 4px; min-width: 0; }
+.team-field select, .team-field input { min-width: 0; max-width: 100%; }
+.team-architects { border: 1px solid var(--line); border-radius: var(--r-sm); margin: 0; padding: 8px 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.team-roles, .team-profiles, .team-agent-controls { display: grid; gap: 10px; }
+.team-agent { border: 1px solid var(--line); border-radius: var(--r-sm); padding: 8px 12px; min-width: 0; }
+.team-agent > summary { cursor: pointer; font-size: .875rem; font-weight: 600; min-height: 28px; }
+.team-agent-controls { padding-top: 8px; }
+.team-profile-save { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.team-teacher { border-top: 1px solid var(--line); padding-top: 8px; display: grid; gap: 8px; }
+.plan-editor { display: grid; gap: 10px; margin: 0; padding-left: 22px; }
+.plan-editor li { display: grid; gap: 4px; }
+.plan-editor label { display: grid; gap: 3px; }
+.plan-editor textarea { resize: vertical; }
+.agent-card { display: grid; gap: 3px; }
+.agent-status { font-size: .8125rem; }
+@media (max-width: 480px) {
+  .team-grid { grid-template-columns: 1fr; }
+  .team-architects { grid-template-columns: 1fr; }
+  .run-cost { white-space: normal; text-align: right; max-width: 45%; }
+}

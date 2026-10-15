@@ -198,7 +198,7 @@ async def test_file_links_download_and_other_users_are_refused(client):
     await client.post("/api/dev/plan", json={"plan": "student"}, headers=h)
     await client.post("/api/dev/topup", json={"credits": 500}, headers=h)
     ev = await sse_events(client, {"message": "Make a 4 slides PPT on plants", "mode": "auto", "confirm": True}, h)
-    f = [e for e in ev if e["type"] == "file_created"][0]["file"]
+    f = [e["file"] for e in ev if e["type"] == "file_created" and e["file"]["name"].endswith(".pptx")][0]
     link = (await client.get(f"/api/files/{f['id']}/link", headers=h)).json()["url"]
     dl = await client.get(link, headers=h)
     assert dl.status_code == 200 and dl.content[:2] == b"PK"

@@ -46,6 +46,9 @@ class FakeOpenRouter:
         everything = " ".join(m["content"] for m in msgs if isinstance(m["content"], str))
         if "You route messages" in sys:
             return json.dumps({"intent": "teach", "needs": [], "complexity": "medium", "make_plan": False})
+        if "You understand and clarify" in sys:
+            return json.dumps({"goal": user[:400], "enhanced_prompt": user[:1000], "constraints": [],
+                               "missing": [], "research": False, "files": False, "queries": []})
         if "You are the planner" in sys:
             return json.dumps({"steps": [
                 {"title": "Work out the numbers", "kind": "calculate", "detail": "compute"},
@@ -158,6 +161,9 @@ class FakeOpenRouter:
             pin, pout = PRICES.get(model, (1.0, 1.0))
             usage = {"prompt_tokens": tin, "completion_tokens": tout, "total_tokens": tin + tout,
                      "completion_tokens_details": {"reasoning_tokens": reasoning}, "prompt_tokens_details": {"cached_tokens": 0}}
+            searched = any(tool.get("type") == "openrouter:web_search" for tool in body.get("tools", []))
+            if searched:
+                usage["server_tool_use"] = {"web_search_requests": 1}
             if not self.no_cost:
                 usage["cost"] = (tin * pin + tout * pout) / 1e6 * self.cost_mult
             finish = "length" if empty else "stop"
@@ -165,10 +171,14 @@ class FakeOpenRouter:
                 def gen():
                     for i in range(0, len(text), 40):
                         yield "data: " + json.dumps({"model": model, "choices": [{"delta": {"content": text[i:i + 40]}}]}) + "\n\n"
+                    if searched:
+                        yield "data: " + json.dumps({"model": model, "choices": [{"delta": {"annotations": [
+                            {"type": "url_citation", "url_citation": {"url": "https://example.com", "title": "Example source"}}]}}]}) + "\n\n"
                     yield "data: " + json.dumps({"model": model, "choices": [{"delta": {}, "finish_reason": finish}], "usage": usage}) + "\n\n"
                     yield "data: [DONE]\n\n"
                 return StreamingResponse(gen(), media_type="text/event-stream")
-            return {"model": model, "choices": [{"message": {"role": "assistant", "content": text, "reasoning": "thinking..." if reasoning else None},
+            return {"model": model, "choices": [{"message": {"role": "assistant", "content": text, "reasoning": "thinking..." if reasoning else None,
+                        "annotations": [{"type": "url_citation", "url_citation": {"url": "https://example.com", "title": "Example source"}}] if searched else []},
                                                  "finish_reason": finish}], "usage": usage}
 
         return app

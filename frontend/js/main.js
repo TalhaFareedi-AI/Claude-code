@@ -4,13 +4,15 @@ import { renderMarkdown } from './markdown.js';
 import { ArtifactStore, RunView, messageFooter, nextButtons } from './runview.js';
 import { FilesPanel } from './files.js';
 import { DEFAULTS, DISPLAY_DEFAULTS, ACCENTS, buildSettings, currentMode, modeName, modelLabel } from './settings.js';
+import { sanitizeTeam, teamName } from './team.js';
 
 const store = safeStore();
-const S = { ...DEFAULTS, ...store.get('sh.settings', {}) };          // choices for the next message
+const S = { ...JSON.parse(JSON.stringify(DEFAULTS)), ...store.get('sh.settings', {}) }; // choices for the next message
 const display = { ...DISPLAY_DEFAULTS, ...store.get('sh.display', {}) };
 const app = {
   boot: null, convId: null, running: false, controller: null, taskId: null, lastPayload: null, artifacts: new ArtifactStore(),
   stick: true, uploads: [], est: null, estSeq: 0, lastAssistantId: null,
+  convSeq: 0, chatListSeq: 0,
 };
 const files = new FilesPanel();
 const thread = $('#thread'), wrap = $('#thread-wrap'), input = $('#composer-text');
@@ -41,7 +43,7 @@ async function init() {
   await refreshChats();
   const resume = store.get('sh.run', null);
   const last = store.get('sh.conv', null);
-  if (resume?.conv) { await openConversation(resume.conv); if (resume.task) resumeRun(resume.task, resume.conv); }
+  if (resume?.conv) { await openConversation(resume.conv); if (resume.task) { app.lastPayload = resume.payload; resumeRun(resume.task, resume.conv, resume.payload); } }
   else if (last) await openConversation(last);
   else showWelcome();
   files.refresh(app.convId);
@@ -58,9 +60,16 @@ function sanitizeSettings() {
   const ids = new Set(b.models.filter((m) => m.allowed).map((m) => m.id));
   for (const [k, v] of Object.entries(S.brains)) if ([].concat(v).some((x) => x && !ids.has(x))) delete S.brains[k];
   S.tools = S.tools.filter((t) => b.tools.some((x) => x.id === t));
+  S.team = sanitizeTeam(S.team, b);
+  S.teacher_enabled = S.teacher_enabled !== false;
+  if (S.teacher_model && !ids.has(S.teacher_model)) S.teacher_model = null;
 }
 
-const persist = () => store.set('sh.settings', S);
+const teamChoices = () => ({ team: S.team, teacher_enabled: S.teacher_enabled, teacher_model: S.teacher_model });
+const persist = () => {
+  store.set('sh.settings', S);
+  if (app.convId) store.set(`sh.team.chat.${app.boot.user.id}.${app.convId}`, teamChoices());
+};
 function banner(text) { const el = $('#banner'); el.textContent = text; el.hidden = false; }
 
 // ------------------------------------------------------------------ wallet and plan
@@ -79,8 +88,10 @@ async function refreshWallet() { try { paintWallet(await api('/api/wallet')); } 
 
 // ------------------------------------------------------------------ chat list
 async function refreshChats() {
+  const seq = ++app.chatListSeq;
   let list = [];
   try { list = await api('/api/conversations'); } catch { return; }
+  if (seq !== app.chatListSeq) return;
   $('#chat-empty').hidden = list.length > 0;
   $('#chat-list').replaceChildren(...list.map((c) => h('li', { class: 'chat-item' + (c.id === app.convId ? ' active' : '') },
     h('button', { type: 'button', class: 'open', title: `${c.title} · ${timeAgo(c.updated_at)}`, text: c.title, 'aria-current': c.id === app.convId ? 'true' : null, onclick: () => { closeSide(); openConversation(c.id); } }),
@@ -89,6 +100,7 @@ async function refreshChats() {
 
 function newChat() {
   if (app.running) return toast('Wait for the current run, or press Stop.');
+  app.convSeq++;
   app.convId = null; thread.replaceChildren(); app.artifacts = new ArtifactStore(); app.lastAssistantId = null;
   $('#chat-title').textContent = 'New chat'; store.set('sh.run', null); store.set('sh.conv', null);
   showWelcome(); files.refresh(null); refreshChats(); input.focus();
@@ -103,9 +115,13 @@ function showWelcome() {
 // ------------------------------------------------------------------ history
 async function openConversation(id) {
   if (app.running) return toast('Wait for the current run, or press Stop.');
+  const seq = ++app.convSeq;
   let c;
-  try { c = await api(`/api/conversations/${id}`); } catch (e) { store.set('sh.run', null); showWelcome(); return toast(e.message); }
+  try { c = await api(`/api/conversations/${id}`); } catch (e) { if (seq !== app.convSeq) return; store.set('sh.run', null); showWelcome(); return toast(e.message); }
+  if (seq !== app.convSeq || app.running) return;
   app.convId = id; app.artifacts = new ArtifactStore(); store.set('sh.conv', id);
+  const savedTeam = store.get(`sh.team.chat.${app.boot.user.id}.${id}`, null);
+  if (savedTeam) { Object.assign(S, savedTeam); sanitizeSettings(); paintChips(); scheduleEstimate(); }
   $('#chat-title').textContent = c.title;
   thread.replaceChildren();
   const lastAssistant = [...c.messages].reverse().find((m) => m.role === 'assistant');
@@ -156,6 +172,7 @@ function buildPayload(message, opts = {}) {
   const p = {
     message, conversation_id: app.convId, mode: S.mode, brains: S.brains, effort: S.effort, rounds: S.rounds, tries: S.tries,
     max_credits: S.cap, tools: S.tools, skills: S.skills, private_route: S.private || null, uploads: app.uploads.map((u) => u.id),
+    team: S.team, teacher_enabled: S.teacher_enabled, teacher_model: S.teacher_model,
   };
   if (opts.intent) p.intent = opts.intent;
   if (opts.target_message) p.target_message = opts.target_message;
@@ -168,7 +185,9 @@ async function send(opts = {}) {
   if (!text && !opts.payload) return;
   if (!opts.payload && app.boot && app.available < 1) return toast('You are out of credits.');
   $('.welcome', thread)?.remove();
-  const payload = opts.payload || buildPayload(text, opts);
+  const payload = JSON.parse(JSON.stringify(opts.payload || buildPayload(text, opts)));
+  payload.request_id ||= requestId();
+  app.taskId = null;
   if (!opts.noEcho) {
     thread.append(h('div', { class: 'msg user' }, h('div', { class: 'bubble', text }, app.uploads.length ? h('div', { class: 'muted small', text: '📎 ' + app.uploads.map((u) => u.name).join(', ') }) : null)));
     input.value = ''; autoGrow();
@@ -179,8 +198,9 @@ async function send(opts = {}) {
   const run = new RunView({
     artifacts: app.artifacts,
     display, onDetails: showDetails,
+    onPrompt: editEnhancedPrompt,
     onFile: () => { files.refresh(app.convId); openFilesPanelSoft(); },
-    onAsk: (a) => handleAsk(a, msgEl),
+    onAsk: (a) => handleAsk(a, msgEl, payload),
   });
   run.onPaint = () => scrollDown();
   msgEl.append(run.el); thread.append(msgEl); scrollDown(true);
@@ -190,17 +210,23 @@ async function send(opts = {}) {
     await streamChat(payload, (ev) => {
       if (ev.type === 'hello') {
         if (!app.convId) $('#chat-title').textContent = text.slice(0, 60);
-        app.convId = ev.conversation_id; app.taskId = ev.task_id; store.set('sh.run', { conv: ev.conversation_id, task: ev.task_id }); store.set('sh.conv', ev.conversation_id);
+        app.convId = ev.conversation_id; app.taskId = ev.task_id; store.set('sh.run', { conv: ev.conversation_id, task: ev.task_id, payload }); store.set('sh.conv', ev.conversation_id);
+        persist();
       }
       run.handle(ev);
       if (ev.type === 'text') run.ensureAnswer(msgEl);
       scrollDown();
     }, app.controller.signal);
   } catch (e) {
-    run.handle({ type: 'error', text: e instanceof ApiError ? e.message : 'Something went wrong. Please try again.', retry: !!(e && e.status !== 429 && e.status !== 400) });
-    run.handle({ type: 'run_done', status: 'error', used: 0, max: 0 });
+    if (app.taskId && (e.status === 0 || !(e instanceof ApiError))) {
+      run.handle({ type: 'notice', text: 'Reconnecting to your running task…' });
+      await followRun(app.taskId, run, msgEl);
+    } else {
+      run.handle({ type: 'error', text: e instanceof ApiError ? e.message : 'Something went wrong. Please try again.', retry: !!(e && e.status !== 429 && e.status !== 400) });
+      run.handle({ type: 'run_done', status: 'error', used: run.used, max: run.max });
+    }
   } finally {
-    setRunning(false); store.set('sh.run', null);
+    setRunning(false); rememberPending(run, payload);
     finishMessage(run, msgEl);
     refreshWallet(); refreshChats(); files.refresh(app.convId);
   }
@@ -217,17 +243,25 @@ function finishMessage(run, msgEl) {
   scrollDown();
 }
 
-function handleAsk(a, msgEl) {
+function handleAsk(a, msgEl, originalPayload) {
   if (a.kind === 'topup') return showCredits();
-  const old = app.lastPayload;
-  msgEl.remove();
-  if (a.kind === 'confirm' || a.kind === 'retry') send({ payload: { ...old, confirm: true }, noEcho: true });
-  else if (a.kind === 'continue') send({ payload: { ...old, message: 'Continue the task.', continue_task: a.task_id, extra_credits: a.extra, confirm: true, max_credits: null }, noEcho: true });
+  if (app.running) return toast('Wait for the current run, or press Stop.');
+  const old = originalPayload || app.lastPayload;
+  if (!old) return toast('Open the chat again to restore this task.');
+  if (!['approve_plan', 'continue'].includes(a.kind)) msgEl.remove();
+  if (a.kind === 'retry') send({ payload: { ...old, ...(a.task_id ? { request_id: requestId() } : {}) }, noEcho: true });
+  else if (a.kind === 'confirm') send({ payload: { ...old, request_id: requestId(), confirm: true }, noEcho: true });
+  else if (a.kind === 'approve_plan') send({ payload: { ...old, request_id: requestId(), continue_task: a.task_id, approved_plan: a.plan, extra_credits: a.extra || 0, confirm: true, max_credits: a.max || old.max_credits || null }, noEcho: true });
+  else if (a.kind === 'continue') send({ payload: { ...old, request_id: requestId(), message: 'Continue the task.', continue_task: a.task_id, extra_credits: a.extra, confirm: true, max_credits: null }, noEcho: true });
   else if (a.kind === 'raise') {
     const m = currentMode(app.boot, S) || app.boot.modes.find((x) => x.id === 'normal');
-    send({ payload: { ...old, max_credits: Math.min(m.max_credits, Math.max(2, (old.max_credits || app.boot.user.auto_spend) * 2)), confirm: true }, noEcho: true });
+    send({ payload: { ...old, request_id: requestId(), max_credits: Math.min(m.max_credits, Math.max(2, (old.max_credits || app.boot.user.auto_spend) * 2)), confirm: true }, noEcho: true });
   }
+  return true;
 }
+
+function requestId() { return globalThis.crypto?.randomUUID?.() || `req_${Date.now()}_${Math.random().toString(36).slice(2)}`; }
+function editEnhancedPrompt(text) { input.value = String(text).slice(0, 12000); autoGrow(); scheduleEstimate(); input.focus(); }
 
 function setRunning(on) {
   app.running = on;
@@ -236,29 +270,46 @@ function setRunning(on) {
 }
 
 async function stopRun() {
-  if (!app.taskId) return;
+  if (!app.taskId) return toast('The task is starting. Press Stop again in a moment.');
   $('#stop-btn').disabled = true;
   try { await api(`/api/runs/${app.taskId}/stop`, { method: 'POST' }); } catch (e) { toast(e.message); }
   setTimeout(() => { $('#stop-btn').disabled = false; }, 1500);
 }
 
 // A reload while a run is working: replay what happened, then keep following until it ends.
-async function resumeRun(taskId, convId) {
-  let after = 0, done = false;
+async function resumeRun(taskId, convId, payload) {
   const msgEl = h('div', { class: 'msg assistant' });
-  const run = new RunView({ artifacts: app.artifacts, display, onDetails: showDetails, onAsk: () => {}, onFile: () => files.refresh(convId) });
+  const run = new RunView({ artifacts: app.artifacts, display, onDetails: showDetails, onPrompt: editEnhancedPrompt, onAsk: (a) => handleAsk(a, msgEl, payload), onFile: () => files.refresh(convId) });
   run.onPaint = () => scrollDown();
   msgEl.append(run.el); thread.append(msgEl);
   setRunning(true); app.taskId = taskId;
-  while (!done) {
-    let r;
-    try { r = await api(`/api/runs/${taskId}/events?after=${after}`); } catch { break; }
-    for (const ev of r.events) { after = ev.seq; run.handle(ev); if (ev.type === 'text') run.ensureAnswer(msgEl); if (ev.type === 'run_done') done = true; }
-    if (!done) await new Promise((res) => setTimeout(res, 1000));
-  }
-  setRunning(false); store.set('sh.run', null);
+  await followRun(taskId, run, msgEl);
+  setRunning(false); rememberPending(run, payload);
   if (run.status === 'done') { thread.replaceChildren(); await openConversation(convId); } else finishMessage(run, msgEl);
   refreshWallet();
+}
+
+function rememberPending(run, payload) {
+  const pending = run.status === 'working' || ['awaiting_plan', 'awaiting_confirm', 'paused'].includes(run.status);
+  store.set('sh.run', pending && run.taskId ? { conv: app.convId, task: run.taskId, payload } : null);
+}
+
+async function followRun(taskId, run, msgEl) {
+  let failures = 0;
+  while (run.status === 'working') {
+    let r;
+    try { r = await api(`/api/runs/${taskId}/events?after=${run.lastSeq || 0}`); failures = 0; }
+    catch {
+      if (++failures >= 4) {
+        run.handle({ type: 'notice', text: 'Your task is saved on the server. Reload this page to reconnect when your connection returns.' });
+        return false;
+      }
+      await new Promise((res) => setTimeout(res, Math.min(4000, failures * 1000))); continue;
+    }
+    for (const ev of r.events) { run.handle(ev); if (ev.type === 'text') run.ensureAnswer(msgEl); }
+    if (run.status === 'working') await new Promise((res) => setTimeout(res, 1000));
+  }
+  return true;
 }
 
 // ------------------------------------------------------------------ scrolling
@@ -270,22 +321,13 @@ function scrollDown(force) {
 
 // ------------------------------------------------------------------ composer: chips, estimate, attachments
 function paintChips() {
-  const b = app.boot, mode = currentMode(b, S);
+  const b = app.boot;
   const chip = (label, value, focus, cls = '') => h('button', { type: 'button', class: `chip ${cls}`, onclick: () => openSettings(focus) }, `${label}: `, h('b', { text: value }));
-  const brainText = (() => {
-    if (!mode) return 'Auto';
-    const r = Object.values(S.brains)[0];
-    if (!r) return 'Auto';
-    const first = [].concat(r)[0];
-    return (b.models.find((m) => m.id === first)?.name || 'Custom') + (Object.keys(S.brains).length > 1 ? ' +' : '');
-  })();
   $('#chips').replaceChildren(
     chip('Mode', modeName(b, S), 'mode'),
-    chip('Brain', brainText, 'brain', 'hide-m'),
-    chip('Effort', b.efforts.find((e) => e.id === S.effort)?.label || 'Auto', 'effort', 'hide-m'),
-    chip('Tools', String(S.tools.length), 'tools', 'hide-m'),
-    chip('Display', 'View', 'display', 'hide-m'),
-    h('button', { type: 'button', class: 'chip', onclick: () => openSettings('mode'), 'aria-label': 'All settings' }, '⚙ Settings'));
+    chip('Team', teamName(S.team), 'team'),
+    chip('Tools', String(S.tools.length), 'tools'),
+    h('button', { type: 'button', class: 'chip', onclick: () => openSettings('mode'), 'aria-label': 'All settings', text: '⚙ Settings' }));
 }
 
 let estTimer;
@@ -297,7 +339,7 @@ async function runEstimate() {
     const e = await api('/api/estimate', { method: 'POST', body: { ...buildPayload(input.value.slice(0, 600) || 'hello'), conversation_id: null, uploads: [] } });
     if (seq !== app.estSeq) return;
     app.est = e;
-    const cap = S.cap ?? e.cap;
+    const cap = Math.min(S.cap ?? e.cap, e.max_cap);
     el.replaceChildren(`${e.mode_name}: about `, h('b', { text: `${e.credits} credit${e.credits === 1 ? '' : 's'}` }), `, up to ${cap}`,
       e.needs_confirm ? ' · asks first' : '', cap < e.credits ? ' · cap is low, may stop early' : '', app.available != null && app.available < Math.min(cap, e.credits) ? ' · not enough credits' : '');
     el.title = e.parts.map((p) => `${p.name}: $${p.usd.toFixed(5)}`).join('\n');
@@ -404,7 +446,17 @@ function wireStatic() {
   $('#settings-close').addEventListener('click', () => hideSheet('#settings'));
   $('#dialog-close').addEventListener('click', () => hideSheet('#dialog'));
   for (const id of ['#settings', '#dialog']) $(id).addEventListener('click', (e) => { if (e.target === $(id)) hideSheet(id); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { hideSheet('#settings'); hideSheet('#dialog'); closeSide(); } });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { hideSheet('#settings'); hideSheet('#dialog'); closeSide(); }
+    if (e.key !== 'Tab') return;
+    const sheet = $('#dialog:not([hidden])') || $('#settings:not([hidden])');
+    if (!sheet) return;
+    const controls = $$('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, a[href]', sheet).filter((el) => el.getClientRects().length);
+    const first = controls[0], last = controls.at(-1);
+    if (!first) return;
+    if (!sheet.contains(document.activeElement) || (!e.shiftKey && document.activeElement === last)) { e.preventDefault(); first.focus(); }
+    else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  });
   $('#open-profile').addEventListener('click', () => { closeSide(); showProfile(); });
   $('#credit-pill').addEventListener('click', showCredits);
   $('#wallet').addEventListener('dblclick', showCredits);

@@ -1,6 +1,7 @@
 // The picker: mode, brain, effort, rounds, cost cap, tools, skills, privacy. Web and phone read the same lists
 // from the server, so a new mode or model appears here without a new release.
 import { h, $ } from './dom.js';
+import { buildTeamSettings } from './team.js';
 
 export const DISPLAY_DEFAULTS = { anim: 'on', open: 'running', timing: true, thinking: true, size: 'm', density: 'cozy', accent: 'teal' };
 export const ACCENTS = { teal: '#2a7f6f', blue: '#2f6fd1', violet: '#7a55c9', orange: '#c4622d', rose: '#c2415d' };
@@ -8,6 +9,7 @@ export const ACCENTS = { teal: '#2a7f6f', blue: '#2f6fd1', violet: '#7a55c9', or
 export const DEFAULTS = {
   mode: 'auto', brains: {}, effort: 'auto', rounds: null, tries: null, cap: null,
   tools: ['chart', 'diagram', 'documents', 'ppt', 'web'], skills: null, private: false,
+  team: {}, teacher_enabled: true, teacher_model: null,
 };
 
 const TIER_LABEL = { quick: 'Quick (cheap, fast)', smart: 'Smart (all-rounder)', genius: 'Genius (strongest)' };
@@ -78,6 +80,7 @@ export function buildSettings(boot, S, { onChange, focus, display, onDisplay }) 
       }
     }
     body.append(brainSec);
+    body.append(buildTeamSettings(boot, S, { onChange, brainSelect }));
 
     // --- Effort
     const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Effort' }, boot.efforts.map((e) => h('button', { type: 'button', text: e.label, 'aria-pressed': String(S.effort === e.id), disabled: !e.allowed, title: e.allowed ? '' : 'Needs a higher plan', onclick: () => set({ effort: e.id }) })));

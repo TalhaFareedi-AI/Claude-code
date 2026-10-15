@@ -83,10 +83,11 @@ def resolve(db: DB, tier: str, *, need_thinks: bool = False, exclude: tuple = ()
     return sorted(pool, key=_blend)[0]
 
 
-def fallbacks(db: DB, primary: str, n: int = 2, *, private_only: bool = False) -> list[str]:
+def fallbacks(db: DB, primary: str, n: int = 2, *, private_only: bool = False,
+              tiers_allowed: list[str] | None = None) -> list[str]:
     """Backup models for OpenRouter's `models` list: same tier first, cheapest first."""
     cur = get(db, primary)
-    rows = listing(db)
+    rows = listing(db, tiers_allowed)
     if private_only:
         rows = [r for r in rows if r["private_route"]]
     same = [r for r in rows if cur and r["tier"] == cur["tier"] and r["id"] != primary]
@@ -114,12 +115,13 @@ def sync_live(db: DB, live_models: list[dict]) -> dict:
             continue
         params = m.get("supported_parameters") or []
         thinks = 1 if ("reasoning" in params or "include_reasoning" in params) else 0
+        cached = _per_million(pr.get("input_cache_read"))
         db.run(
             "INSERT INTO model_catalog(id,name,lab,region,tier,price_in,price_out,price_cached,thinks,"
             "reasoning_style,context,available,approved,private_route,source,updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,1,0,1,'live',?)",
             (mid, m.get("name") or mid, mid.split("/")[0], "unknown", _guess_tier(pout), pin, pout,
-             _per_million(pr.get("input_cache_read")) or pin, thinks, "effort", m.get("context_length"), now()),
+             pin if cached is None else cached, thinks, "effort", m.get("context_length"), now()),
         )
         report["new"] += 1
     return report

@@ -6,31 +6,73 @@ and a website with a credit wallet (the **platform**). Every AI call goes throug
 ```
 backend/app    FastAPI server, harness, 10 modes, wallet, charts, file builders
 frontend       the screen (plain HTML, CSS and JavaScript, no build step, no CDN)
-backend/tests  54 tests (a local fake OpenRouter is used, so they cost nothing)
+backend/tests  unit and integration tests (a local fake OpenRouter is used, so they cost nothing)
 scripts        live_test.py (real OpenRouter) and ui_check.cjs (real browser)
 ```
 
 ## Run it
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env          # then put your key in .env (git ignores this file)
 uvicorn app.main:app --app-dir backend --port 8000
 ```
 Open http://localhost:8000. With `DEV_MODE=1` the sidebar has a "Test as plan" switch and a "+500 credits" button.
 
+Model IDs in the plan are examples. On a fresh database, live sync may retire them and hold newly discovered models
+for approval. If the model picker is empty, configure a private `ADMIN_TOKEN`, restart the app, and use the admin API
+with an `x-admin-token` header: POST `/api/admin/catalog/sync`, GET `/api/admin/catalog`, then POST
+`/api/admin/catalog/approve` with `{"model_id":"an exact live ID","tier":"quick","on":true}`. Approve suitable
+Quick, Smart and Genius models after checking their actual prices and capabilities. Unknown models are never
+automatically approved. Keep the token in secure settings and out of command history and committed files.
+
 ## Test it
 
 ```bash
-python -m pytest                        # 54 tests, no network, no cost
+python -m pytest                        # backend unit/integration tests, no network, no cost
 python backend/tests/demo_server.py     # the real app on port 8765, backed by the fake OpenRouter
 node scripts/ui_check.cjs               # 19 checks in a real browser against that server
+node scripts/team_ui_check.cjs          # team controls, edited approval, reload and reconnect
+node scripts/chart_regression.cjs       # isolated browser regressions for extreme chart ranges
 python scripts/live_test.py --quick     # REAL OpenRouter: key check, model sync, one call, cost check
 python scripts/live_test.py             # REAL OpenRouter: every mode on the cheapest brains
 ```
 
 `BRAIN_POLICY=cheap` (the default for now) makes every brain slot use the cheapest Quick or Smart model, so tests
 cost almost nothing. Set `BRAIN_POLICY=preferred` to use the plan's tiers (Quick, Smart, Genius) as written.
+
+The browser scripts require Playwright and Chromium. Set `CHROME=/usr/bin/chromium` when using the system browser.
+
+## Agent teams and optional teaching
+
+The **Team** chip opens Fast, Balanced and Full team profiles. Choose planning Off/Auto/Ask me, Light/Normal/Deep
+replanning, up to three planners and a plan judge, UI/data/document/code architects, and up to five researchers.
+Each planner or researcher can use its own model, effort, time limit and credit cap. Researchers can also use different
+search engines and search limits. Architect blueprints are downloadable files. The builder receives those blueprints
+and linked research notes; steps have explicit goals and acceptance checks, with at most two repairs.
+
+**Ask me** pauses after planning, before architecture, search or building. Edit the step goals and checks, then approve.
+Approval spends the remaining original budget. A later explicit credit continuation adds a new bounded budget while
+reusing completed work. The server preserves the original goal, tools and privacy settings. Browser reload/reconnection
+replays saved events, and repeated sends with the same request identity do not create or bill a second run.
+
+Turn **Use a teacher model** off for direct answers. With it on, Auto applies teaching style within the answer call.
+Selecting a teacher model adds a separately metered explanation pass. If that pass fails, truncates, or drops source links,
+code or artifact references, the original answer is kept.
+
+Web search must be enabled in Tools. Research uses OpenRouter's `openrouter:web_search` server tool and citation metadata,
+not the deprecated plugin. Unsourced results are disclosed and excluded from factual synthesis. All foreground calls,
+repairs and retries reserve credits against the shared task cap, including concurrent agents. Server-tool cost thresholds
+are soft provider controls: pending searches and a final answer may still execute; native search behavior varies by provider.
+
+Named team profiles and chat preferences are saved in the current browser. Run one Uvicorn worker with the SQLite/local
+scheduler: startup reconciles interrupted runs, settles recorded usage, and pauses saved plans without repeating paid calls.
+This is not a distributed worker queue. Anonymous sessions use signed cookies and a persistent ignored local signing key;
+the `x-user-id` development override is accepted only in `DEV_MODE=1`. School routes and background learning require ZDR.
+
+See [the plan coverage matrix](docs/plan-coverage.md) for every plan section, tested acceptance cases, and remaining work.
 
 ## What is built (plan section in brackets)
 
@@ -43,8 +85,8 @@ cost almost nothing. Set `BRAIN_POLICY=preferred` to use the plan's tiers (Quick
 | Fast, Normal, Deep, Think Again, Overthink, Council, Two Brains, Think Team, Research, Developer [3] | `runners.py`, `modes.py` |
 | Rules-first router, planner, checker (2 fix tries), teacher layer, three stops [3] | `harness.py`, `postprocess.py` |
 | Safe formula engine and chart recipes, charts that move with 0 tokens [5] | `formula.py`, `charts.py`, `frontend/js/charts.js` |
-| PPT and Word builders, edit "make slide 3 simpler" as version 2 [6] | `tools/` |
-| 7 skills, headers always visible, recipe opened only when needed [13] | `skills/`, `skills.py` |
+| PPT and Word builders, edit "make slide 3 simpler" into a new retained output [6] | `tools/` |
+| 7 skills, headers used during skill selection, recipe opened only when needed [13] | `skills/`, `skills.py` |
 | Prompt library with versions (`name.v1.md`) [4] | `prompts/` |
 | Live run card, files panel, effort, brain, cost cap pickers, phone sheets [14] | `frontend/` |
 | One private folder per user and task, path checks, signed expiring links, upload checks [14] | `workspace.py`, `main.py` |
