@@ -17,13 +17,13 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import catalog, modes as modes_mod, skills, wallet, workspace
+from . import accounts, activity, billing, catalog, memory, modes as modes_mod, plans, skills, wallet, workspace
 from .config import ROOT, settings
 from .db import DB, jdump, jload, now
 from .harness import Harness, RunContext, RunRequest, UserError
 from .openrouter import OpenRouter, OpenRouterError
-from .plans import PLAN_RULES, rules as plan_rules
-from .pricing import EFFORT_ORDER, PLAN_MAX_EFFORT
+from .plans import rules as plan_rules
+from .pricing import EFFORT_ORDER
 
 FRONTEND = ROOT / "frontend"
 TOOLS = [
@@ -79,6 +79,12 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
     db = db or DB(settings.db_path)
     catalog.seed(db)
     modes_mod.seed(db)
+    plans.bind(db, modes_mod.listing(db))
+    if settings.admin_email and settings.admin_password:
+        try:
+            accounts.ensure_admin(db, settings.admin_email, settings.admin_password)
+        except accounts.AuthError as exc:
+            print(f"ADMIN_EMAIL/ADMIN_PASSWORD ignored: {exc}")
     llm = llm or OpenRouter()
     harness = Harness(db, llm)
     hits: dict[str, deque] = defaultdict(deque)
@@ -115,6 +121,12 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
 
     # ---- who is this -------------------------------------------------------------------
     def who(request: Request, response: Response | None = None) -> dict:
+        session_user = accounts.session_user(db, request.cookies.get("sid"))
+        if session_user:
+            request.state.user_id = session_user["id"]
+            if session_user.get("status") == "blocked":
+                raise HTTPException(403, "This account is blocked. Contact support.")
+            return harness.get_user(session_user["id"])
         cookie = request.cookies.get("uid", "")
         raw_uid, _, signature = cookie.partition(".")
         expected = hmac.new(settings.secret.encode(), raw_uid.encode(), hashlib.sha256).hexdigest()
@@ -124,7 +136,15 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         if not uid or not re.fullmatch(r"u_[A-Za-z0-9_-]{4,40}", uid):
             uid = "u_" + uuid.uuid4().hex[:12]
             request.state.new_uid = uid
-        return harness.get_user(uid)
+        user = harness.get_user(uid)
+        if user.get("email") and not settings.dev_mode:
+            # A registered account must sign in; a guest cookie cannot open it.
+            uid = "u_" + uuid.uuid4().hex[:12]
+            request.state.new_uid = uid
+            user = harness.get_user(uid)
+        if user.get("status") == "blocked":
+            raise HTTPException(403, "This account is blocked. Contact support.")
+        return user
 
     @app.middleware("http")
     async def set_cookie(request: Request, call_next):
@@ -156,15 +176,21 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
                            "thinks": bool(m["thinks"]), "level": price_level(m), "price_in": m["price_in"],
                            "price_out": m["price_out"], "private": bool(m["private_route"]),
                            "allowed": m["tier"] in rl["tiers"]})
-        top = PLAN_MAX_EFFORT[user["plan"]]
+        top = rl.get("max_effort", "low")
         efforts = [{**e, "allowed": e["id"] == "auto" or EFFORT_ORDER.index(e["id"]) <= EFFORT_ORDER.index(top)} for e in EFFORTS]
         return {
             "app": settings.app_title,
             "user": {"id": user["id"], "name": user["name"], "plan": user["plan"], "auto_spend": user["auto_spend"],
-                     "private_route": bool(user["private_route"])},
+                     "private_route": bool(user["private_route"]), "email": user.get("email"), "registered": bool(user.get("email")),
+                     "is_admin": user.get("role") == "admin", "memory_enabled": bool(user.get("memory_enabled", 1)),
+                     "plan_renews_at": user.get("plan_renews_at"), "daily_limit": user.get("daily_limit"),
+                     "monthly_limit": user.get("monthly_limit")},
+            "limits": {"left": harness.remaining_limit(user)},
+            "payment_provider": settings.payment_provider,
             "wallet": {"balance": wallet.balance(db, user["id"]), "held": wallet.held(db, user["id"]),
                        "available": wallet.available(db, user["id"])},
-            "plans": {k: {**v, **{"rules": PLAN_RULES[k]}} for k, v in wallet.PLANS.items()},
+            "plans": {p["id"]: {"name": p["name"], "credits": p["credits"], "price": p["price_usd"], "rules": plans.rules(p["id"])}
+                      for p in plans.all_plans() if p["kind"] == "subscription"},
             "modes": plan_modes(user),
             "models": models,
             "efforts": efforts,
@@ -440,20 +466,24 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         return {"ok": True}
 
     # ---- dev + admin ---------------------------------------------------------------------------------------------------------------------------
-    def need_admin(request: Request) -> None:
-        if settings.dev_mode:
-            return
-        if not settings.admin_token or request.headers.get("x-admin-token") != settings.admin_token:
-            raise HTTPException(403, "admin only")
+    def need_admin(request: Request) -> dict:
+        """Admins sign in with email and password (role=admin), or send the ADMIN_TOKEN header (scripts)."""
+        user = accounts.session_user(db, request.cookies.get("sid"))
+        if user and user.get("role") == "admin" and user.get("status") != "blocked":
+            return user
+        if settings.admin_token and hmac.compare_digest(request.headers.get("x-admin-token", ""), settings.admin_token):
+            return {"id": "admin-token", "role": "admin"}
+        raise HTTPException(403, "Admin login required.")
 
     @app.post("/api/dev/plan")
     def dev_plan(request: Request, plan: str = Body(..., embed=True)):
         if not settings.dev_mode:
             raise HTTPException(403, "dev mode only")
         user = who(request)
-        if plan not in wallet.PLANS:
+        if not plans.get(plan) or plans.get(plan)["kind"] != "subscription":
             raise HTTPException(400, "unknown plan")
         db.run("UPDATE users SET plan=? WHERE id=?", (plan, user["id"]))
+        activity.log(db, user["id"], "plan_changed", plan=plan, via="dev-switch")
         return {"plan": plan}
 
     @app.post("/api/dev/topup")
@@ -491,6 +521,10 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
     def health(request: Request):
         need_admin(request)
         return {"ledger_mismatches": wallet.ledger_mismatches(db), "last_sync": app.state.last_sync}
+
+    from . import routes_account, routes_admin
+    routes_account.install(app, db, harness, who)
+    routes_admin.install(app, db, harness, need_admin)
 
     if FRONTEND.exists():
         app.mount("/", StaticFiles(directory=str(FRONTEND), html=True), name="ui")

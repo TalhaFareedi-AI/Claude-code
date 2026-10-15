@@ -35,7 +35,8 @@ def add(db: DB, user_id: str, delta: int, reason: str, task_id: str | None = Non
 
 
 def grant_plan(db: DB, user_id: str, plan: str) -> None:
-    add(db, user_id, PLANS[plan]["credits"], f"plan:{plan}")
+    from . import plans
+    add(db, user_id, plans.monthly_credits(plan), f"plan:{plan}")
 
 
 def hold(db: DB, user_id: str, task_id: str, amount: int) -> None:
@@ -67,10 +68,17 @@ def release(db: DB, task_id: str) -> None:
     db.run("UPDATE credit_holds SET status='released' WHERE task_id=? AND status='active'", (task_id,))
 
 
+def spent_since(db: DB, user_id: str, since: float) -> int:
+    return int(-db.scalar("SELECT SUM(delta) FROM credit_ledger WHERE user_id=? AND delta<0 AND created_at>=? "
+                          "AND reason NOT LIKE 'admin%'", (user_id, since)))
+
+
+def spent_month(db: DB, user_id: str) -> int:
+    return spent_since(db, user_id, now() - 30 * 86400)
+
+
 def spent_today(db: DB, user_id: str) -> int:
-    day_start = now() - (now() % 86400)
-    return int(-db.scalar("SELECT SUM(delta) FROM credit_ledger WHERE user_id=? AND delta<0 AND created_at>=?",
-                          (user_id, day_start)))
+    return spent_since(db, user_id, now() - (now() % 86400))
 
 
 def ledger_mismatches(db: DB) -> list[dict]:

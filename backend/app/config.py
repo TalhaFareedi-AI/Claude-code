@@ -63,6 +63,10 @@ class Settings:
         self.link_ttl_s = int(_env("LINK_TTL_S", str(15 * 60)))
         self.rate_per_minute = int(_env("RATE_PER_MINUTE", "30"))
         self.admin_token = _env("ADMIN_TOKEN")
+        self.admin_email = _env("ADMIN_EMAIL")
+        self.admin_password = _env("ADMIN_PASSWORD")
+        # test = a purchase is paid at once (no real money). manual = pending until an admin marks it paid.
+        self.payment_provider = _env("PAYMENT_PROVIDER", "test" if _env("DEV_MODE", "0") == "1" else "manual")
         self.app_title = _env("APP_TITLE", "Study Harness")
 
 

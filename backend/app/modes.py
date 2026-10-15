@@ -83,4 +83,8 @@ def listing(db: DB) -> list[dict]:
 
 
 def allowed(mode: dict, plan: str) -> bool:
+    from . import plans
+    unlocked = plans.rules(plan).get("modes")
+    if unlocked is not None:
+        return mode["id"] in unlocked
     return plan in mode["plans"]

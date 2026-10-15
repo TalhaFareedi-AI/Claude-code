@@ -53,7 +53,8 @@ def clamp_effort(effort: str, plan: str) -> str:
     """Never let a plan use more effort than it paid for."""
     if effort == "auto":
         return effort
-    top = PLAN_MAX_EFFORT.get(plan, "low")
+    from . import plans
+    top = plans.rules(plan).get("max_effort") or PLAN_MAX_EFFORT.get(plan, "low")
     if effort not in EFFORT_ORDER:
         return "off"
     return effort if EFFORT_ORDER.index(effort) <= EFFORT_ORDER.index(top) else top

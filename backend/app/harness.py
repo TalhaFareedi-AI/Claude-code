@@ -15,7 +15,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 
-from . import catalog, charts, modes as modes_mod, prompts, skills, wallet, workspace
+from . import activity, catalog, charts, memory, modes as modes_mod, prompts, skills, wallet, workspace
 from .config import settings
 from .db import DB, jdump, jload, now
 from .estimate import estimate
@@ -24,6 +24,7 @@ from .plans import rules as plan_rules
 from .pricing import EFFORT_ORDER, call_cost, clamp_effort, credits_for_cost
 from .tools import calc as calc_tool, diagram
 
+RECENT_MESSAGES = 8  # kept word for word; older turns live in the summary and session notes
 CONTROL_ROLES = {"planner", "checker", "critic", "judge"}  # effort dial does not touch these
 GREETING = re.compile(r"^\s*(hi|hello|hey|thanks?|thank you|ok(ay)?|good (morning|evening|night)|bye)\b[\s!.?]*$", re.I)
 HARD_WORDS = re.compile(r"\b(step by step|prove|derive|design|build|plan|compare|analy[sz]e|research paper|in depth|complete|full)\b", re.I)
@@ -190,6 +191,8 @@ class RunContext:
         self.file_texts: list[tuple[str, str]] = []
         self.profile: dict = {}
         self.summary = ""
+        self.memory_block = ""
+        self.memory_command: dict | None = None
         self._brain_cache: dict = {}
         self.runner = mode["runner"]
         self.rounds: int | None = None
@@ -463,11 +466,15 @@ class RunContext:
             bits.append("Reader profile: " + jdump(self.profile))
         if self.summary:
             bits.append("Earlier in this chat: " + self.summary)
-        return "\n".join(bits)
+        if self.memory_block:
+            bits.append(self.memory_block)
+        if self.memory_command and self.memory_command["kind"] in ("saved", "forgot", "refused"):
+            bits.append(f"Memory action just done for the user: {self.memory_command['text']} Confirm it in one short sentence.")
+        return "\n\n".join(bits)
 
-    def history_messages(self, max_chars: int = 10000) -> list[dict]:
+    def history_messages(self, max_chars: int = 14000) -> list[dict]:
         out, used = [], 0
-        for m in reversed(self.history[-6:]):
+        for m in reversed(self.history[-RECENT_MESSAGES:]):
             c = m["content"]
             if used + len(c) > max_chars:
                 c = c[: max(0, max_chars - used)]
@@ -517,8 +524,24 @@ class Harness:
             self.db.run("INSERT INTO users(id,name,plan,auto_spend,created_at) VALUES(?,?,?,?,?)",
                         (user_id, "Student", "free", settings.auto_spend_limit, now()))
             wallet.grant_plan(self.db, user_id, "free")
+            self.db.run("UPDATE users SET plan_renews_at=? WHERE id=?", (now() + 30 * 86400, user_id))
+            activity.log(self.db, user_id, "account_created", plan="free")
+            u = self.db.one("SELECT * FROM users WHERE id=?", (user_id,))
+        elif u.get("plan_renews_at") and u["plan_renews_at"] < now():
+            from . import billing
+            billing.renew(self.db, u)
             u = self.db.one("SELECT * FROM users WHERE id=?", (user_id,))
         return u
+
+    def remaining_limit(self, user: dict) -> int:
+        """Credits the user may still spend today and this month (admin limits, else the plan's daily cap)."""
+        daily = user.get("daily_limit")
+        if daily is None:
+            daily = plan_rules(user["plan"]).get("daily_credit_cap") or 10**9
+        left = daily - wallet.spent_today(self.db, user["id"])
+        if user.get("monthly_limit") is not None:
+            left = min(left, user["monthly_limit"] - wallet.spent_month(self.db, user["id"]))
+        return int(left)
 
     def attach_uploads(self, user_id: str, task_id: str, ids: list[str]) -> None:
         """Copy the user's uploaded files into this task's inputs folder."""
@@ -792,6 +815,9 @@ class Harness:
                     " VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (task_id, user_id, conv_id, req.mode, req.intent or "", "starting", 0, 0,
                      jdump({"mode": req.mode, "effort": req.effort}), now()))
+        activity.log(self.db, user_id, "chat_sent", conversation_id=conv_id, task_id=task_id, mode=req.mode,
+                     chars=len(req.message), preview=req.message[:160], continued=bool(req.continue_task))
+        self.db.run("UPDATE users SET last_seen_at=? WHERE id=?", (now(), user_id))
         if req.request_id:
             self.db.run("INSERT INTO run_requests(user_id,request_id,task_id,payload_hash) VALUES(?,?,?,?)",
                         (user_id, req.request_id, task_id, fingerprint))
@@ -828,8 +854,14 @@ class Harness:
                         available=wallet.available(self.db, user["id"]))
                 status = "blocked"
                 return
-            if wallet.spent_today(self.db, user["id"]) > 5000:
-                raise UserError("Daily spending cap reached. Try again tomorrow.")
+            if user.get("status") == "blocked":
+                raise UserError("Your account is paused. Please contact support.")
+            remaining_limit = self.remaining_limit(user)
+            if remaining_limit < 1:
+                em.emit("run_start", task_id=task_id, conversation_id=req.conversation_id, mode="", brains={})
+                em.emit("ask", kind="limit", text="You reached your credit limit for now. It resets soon, or ask the admin to raise it.")
+                status = "blocked"
+                return
             # 3-4. desk + route
             route_ctx_mode = modes_mod.get(self.db, "normal")
             task = self.db.one("SELECT * FROM tasks WHERE id=?", (task_id,))
@@ -838,6 +870,17 @@ class Harness:
             ctx.profile = self.profile(user["id"])
             conv = self.db.one("SELECT * FROM conversations WHERE id=?", (req.conversation_id,))
             ctx.summary = conv["summary"] or ""
+            if user.get("memory_enabled", 1) is not None and user.get("memory_enabled", 1):
+                cmd = memory.handle_command(self.db, user["id"], req.message, req.conversation_id)
+                if cmd:
+                    ctx.memory_command = cmd
+                    ctx.notices.append(cmd["text"])
+                    em.emit("memory", action=cmd["kind"], text=cmd["text"])
+                    activity.log(self.db, user["id"], "memory_" + cmd["kind"], text=cmd["text"][:200])
+            ctx.memory_block, used_ids = memory.desk_block(self.db, user, conv, req.message)
+            if used_ids or ctx.memory_block:
+                em.emit("memory", action="recalled", count=len(used_ids),
+                        recalled_chats="Related moments from earlier chats" in ctx.memory_block)
             ctx.history = [{"role": m["role"], "content": m["content"]} for m in self.db.all(
                 "SELECT role,content FROM messages WHERE conversation_id=? AND task_id!=? ORDER BY id",
                 (req.conversation_id, task_id))]
@@ -878,6 +921,7 @@ class Harness:
             cap = max(1, min(cap, mode["max_credits"]))
             if req.continue_task:
                 cap = max(1, min(req.extra_credits, mode["max_credits"]))
+            cap = max(1, min(cap, remaining_limit))  # never past the daily or monthly limit
             if ctx.team.get("max_credits"):
                 cap = min(cap, ctx.team["max_credits"])
             ctx.task["max_credits"] = cap
@@ -957,6 +1001,8 @@ class Harness:
                 self.db.run("UPDATE tasks SET status=? WHERE id=? AND user_id=? AND status='resuming'",
                             ("paused" if status in ("blocked", "error", "awaiting_confirm") else "continued",
                              req.continue_task, user["id"]))
+            activity.log(self.db, user["id"], "run_finished", task_id=task_id, status=status, credits=real,
+                         mode=ctx.mode["id"] if ctx else req.mode, files=len(ctx.files) if ctx else 0)
             em.emit("run_done", status=status, used=real,
                     max=ctx.task["max_credits"] if ctx else 0)
             em.close()
@@ -1025,7 +1071,7 @@ class Harness:
             msgs = self.db.all("SELECT id,role,content FROM messages WHERE conversation_id=? ORDER BY id", (conv_id,))
             conv = self.db.one("SELECT * FROM conversations WHERE id=?", (conv_id,))
             # Compaction: keep the last 6 word for word, summarize older ones every few turns.
-            older = [m for m in msgs[:-6] if m["id"] > conv["summarized_upto"]]
+            older = [m for m in msgs[:-RECENT_MESSAGES] if m["id"] > conv["summarized_upto"]]
             if len(older) >= 4:
                 text = (conv["summary"] and f"Previous summary: {conv['summary']}\n\n" or "") + \
                        "\n".join(f"{m['role']}: {m['content'][:600]}" for m in older)
@@ -1056,3 +1102,34 @@ class Harness:
                                 (user_id, jdump({**ctx.profile, **clean}), now()))
         except Exception:
             pass  # learning is best effort and never blocks the user
+        await self.learn_memory(ctx)
+
+    async def learn_memory(self, ctx: RunContext) -> None:
+        """After each answer, a cheap model updates long-term memory and this chat's session notes."""
+        user = self.db.one("SELECT * FROM users WHERE id=?", (ctx.user["id"],)) or {}
+        if not user.get("memory_enabled", 1):
+            return
+        conv_id = ctx.req.conversation_id
+        try:
+            q = ctx.quick()
+            last = self.db.all("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 2", (conv_id,))
+            exchange = "\n".join(f"{m['role']}: {m['content'][:1500]}" for m in reversed(last))
+            saved = memory.listing(self.db, user["id"])[:40]
+            conv = self.db.one("SELECT notes FROM conversations WHERE id=?", (conv_id,)) or {}
+            prompt = (f"Saved memories:\n" + ("\n".join(f"{m['id']}: [{m['kind']}] {m['content']}" for m in saved) or "(none)") +
+                      f"\n\nCurrent session notes:\n{conv.get('notes') or '(none)'}\n\nLatest exchange:\n{exchange}")
+            res = await asyncio.wait_for(self.llm.chat(
+                q["id"], [{"role": "system", "content": prompts.get("memory")}, {"role": "user", "content": prompt[:9000]}],
+                max_tokens=500, json_mode=True, private=ctx.private, zdr=ctx.plan == "school",
+                reasoning=build_reasoning(q, "off", 500),
+                fallbacks=catalog.fallbacks(self.db, q["id"], private_only=ctx.private, tiers_allowed=ctx.rules["tiers"])), timeout=20)
+            await Meter(self.db, user["id"], ctx.task["id"], 10**6).record("memory", q, res, billable=False)
+            ops = parse_json(res.text)
+            done = memory.apply_ops(self.db, user["id"], ops, conv_id)
+            notes = str(ops.get("session_notes") or "").strip()[:1200]
+            if notes:
+                self.db.run("UPDATE conversations SET notes=? WHERE id=?", (notes, conv_id))
+            if any(done.values()):
+                activity.log(self.db, user["id"], "memory_learned", **done)
+        except Exception:
+            pass  # memory is best effort and never blocks the user

@@ -28,6 +28,7 @@ class FakeOpenRouter:
         self.critic_calls = 0
         self.cost_mult = 1.0                    # make calls cost more, to hit the credit caps
         self.delay = 0.0                        # seconds per call, to watch animations
+        self.memory_add = False                 # let the memory model propose a new memory
         self.no_cost = False                    # drop usage.cost to test the table fallback
         self.app = self._build()
 
@@ -80,6 +81,9 @@ class FakeOpenRouter:
             return "Fact one (example.com). Fact two."
         if "Write the answer from the findings" in sys:
             return "Answer with a [link](https://example.com).\n\n[[next: Explain simpler | Quiz me]]"
+        if "long-term memory of a study assistant" in sys:
+            add = [{"kind": "preference", "content": "Likes cricket examples", "importance": 4}] if self.memory_add else []
+            return json.dumps({"add": add, "update": [], "forget": [], "session_notes": "Studied seeds. Open question: roots."})
         if "Summarize this chat" in sys:
             return "The user studied seeds."
         if "Update the user's learning profile" in sys:

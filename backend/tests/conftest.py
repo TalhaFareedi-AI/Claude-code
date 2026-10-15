@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pytest
 
-from app import catalog, modes
+from app import catalog, modes, plans
 from app.config import settings
 from app.db import DB
 from app.harness import Harness
@@ -24,6 +24,8 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workspace_root", tmp_path / "ws")
     monkeypatch.setattr(settings, "brain_policy", "cheap")
     monkeypatch.setattr(settings, "task_time_limit_s", 60)
+    from app import routes_account
+    routes_account.attempts.clear()
 
 
 @pytest.fixture
@@ -36,6 +38,7 @@ def db():
     d = DB(":memory:")
     catalog.seed(d)
     modes.seed(d)
+    plans.bind(d, modes.listing(d))
     return d
 
 
