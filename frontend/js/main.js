@@ -3,6 +3,7 @@ import { api, streamChat, uploadFile, ApiError } from './api.js';
 import { renderMarkdown } from './markdown.js';
 import { ArtifactStore, RunView, messageFooter, nextButtons } from './runview.js';
 import { FilesPanel } from './files.js';
+import { setupAccount } from './account.js';
 import { DEFAULTS, DISPLAY_DEFAULTS, ACCENTS, buildSettings, currentMode, modeName, modelLabel } from './settings.js';
 import { sanitizeTeam, teamName } from './team.js';
 
@@ -25,6 +26,7 @@ const STARTERS = [
 ];
 
 // ------------------------------------------------------------------ boot
+let account;
 async function init() {
   applyTheme(store.get('sh.theme', null)); applyDisplay();
   try {
@@ -35,7 +37,8 @@ async function init() {
   const b = app.boot;
   document.title = b.app; $('#brand-name').textContent = b.app;
   sanitizeSettings();
-  paintWallet(b.wallet); paintPlan();
+  account = setupAccount({ app, dialog, hide: hideSheet, refreshWallet });
+  paintWallet(b.wallet); paintPlan(); paintAccount();
   if (!b.has_key) banner('No OpenRouter key is set on the server. Add OPENROUTER_API_KEY to the .env file and restart.');
   const sync = b.catalog_sync || {};
   $('#sync-note').textContent = sync.error ? 'Prices: built-in table (live sync unavailable)' : sync.at ? 'Prices: live from OpenRouter' : 'Prices: built-in table';
@@ -78,6 +81,14 @@ function paintWallet(w) {
   $('#wallet-held').textContent = w.held ? `${w.held} on hold` : '';
   app.available = w.available;
 }
+function paintAccount() {
+  const u = app.boot.user;
+  $('#acct-name').textContent = u.registered ? (u.name || 'Student') : 'Guest';
+  $('#acct-email').textContent = u.registered ? u.email : 'Not signed in. Sign up to keep your chats safe.';
+  $('#acct-login').hidden = u.registered; $('#acct-logout').hidden = !u.registered;
+  $('#admin-link').hidden = !u.is_admin;
+}
+
 function paintPlan() {
   const b = app.boot;
   $('#plan-badge').textContent = b.user.plan;
@@ -244,7 +255,7 @@ function finishMessage(run, msgEl) {
 }
 
 function handleAsk(a, msgEl, originalPayload) {
-  if (a.kind === 'topup') return showCredits();
+  if (a.kind === 'topup') return account.showPlans();
   if (app.running) return toast('Wait for the current run, or press Stop.');
   const old = originalPayload || app.lastPayload;
   if (!old) return toast('Open the chat again to restore this task.');
@@ -457,8 +468,12 @@ function wireStatic() {
     if (!sheet.contains(document.activeElement) || (!e.shiftKey && document.activeElement === last)) { e.preventDefault(); first.focus(); }
     else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
   });
-  $('#open-profile').addEventListener('click', () => { closeSide(); showProfile(); });
-  $('#credit-pill').addEventListener('click', showCredits);
+  $('#open-profile').addEventListener('click', () => { closeSide(); account.showMemory(); });
+  $('#open-activity').addEventListener('click', () => { closeSide(); account.showActivity(); });
+  $('#acct-login').addEventListener('click', () => { closeSide(); account.showAuth('login'); });
+  $('#acct-logout').addEventListener('click', () => account.logout());
+  $('#buy-credits').addEventListener('click', () => { closeSide(); account.showPlans(); });
+  $('#credit-pill').addEventListener('click', () => account.showPlans());
   $('#wallet').addEventListener('dblclick', showCredits);
   $('#theme-toggle').addEventListener('click', () => {
     const dark = (document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';

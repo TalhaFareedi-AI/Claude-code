@@ -170,6 +170,10 @@ export class RunView {
     if (ev.thinking) parts.push(`${ev.thinking} thinking`);
     this.body.append(h('div', { class: 'callrow', text: '⚡ ' + parts.join(' · ') }));
   }
+  on_memory(ev) {
+    const text = ev.action === 'recalled' ? `🧠 Using ${ev.count} saved memor${ev.count === 1 ? 'y' : 'ies'}${ev.recalled_chats ? ' and earlier chats' : ''}` : '🧠 ' + ev.text;
+    this.body.append(h('div', { class: 'think', text }));
+  }
   on_check() {}
   on_task_card(ev) {
     const card = ev.card || {};

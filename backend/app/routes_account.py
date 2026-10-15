@@ -14,13 +14,19 @@ from .db import jdump, jload, now
 attempts: dict[str, deque] = defaultdict(deque)
 
 
-def throttle(key: str, limit: int = 8, window: int = 600) -> None:
+def throttle(key: str, limit: int = 8, window: int = 600, count: bool = True) -> None:
     q = attempts[key]
     while q and q[0] < time.time() - window:
         q.popleft()
     if len(q) >= limit:
         raise HTTPException(429, "Too many attempts. Wait a few minutes and try again.")
-    q.append(time.time())
+    if count:
+        q.append(time.time())
+
+
+def clear_throttle(*keys: str) -> None:
+    for k in keys:
+        attempts.pop(k, None)
 
 
 class Credentials(BaseModel):
@@ -67,12 +73,16 @@ def install(app, db, harness, who) -> None:
 
     @app.post("/api/auth/login")
     def login(request: Request, body: Credentials):
-        throttle("login:" + ip(request))
-        throttle("loginmail:" + body.email.strip().lower(), 10)
+        k_ip, k_mail = "login:" + ip(request), "loginmail:" + body.email.strip().lower()
+        throttle(k_ip, count=False)       # only failed attempts are counted
+        throttle(k_mail, 10, count=False)
         try:
             u = accounts.authenticate(db, body.email, body.password)
         except accounts.AuthError as e:
+            throttle(k_ip)
+            throttle(k_mail, 10)
             raise HTTPException(401, str(e))
+        clear_throttle(k_ip, k_mail)
         activity.log(db, u["id"], "login", ip=ip(request))
         resp = JSONResponse({"ok": True, "user": activity.public_user(u)})
         set_session_cookie(request, resp, accounts.create_session(db, u["id"], ip(request), request.headers.get("user-agent", "")))

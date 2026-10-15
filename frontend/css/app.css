@@ -310,3 +310,22 @@ html[data-anim="off"] .progress.indeterminate::after { display: none; }
   .team-architects { grid-template-columns: 1fr; }
   .run-cost { white-space: normal; text-align: right; max-width: 45%; }
 }
+
+/* ---------- accounts, plans, memory, activity ---------- */
+.account-box { background: var(--panel-2); border-radius: var(--r); padding: var(--s3); display: grid; gap: var(--s2); }
+.form-error { color: var(--bad); background: var(--bad-soft); padding: 6px 10px; border-radius: var(--r-sm); margin: 0; font-size: .875rem; }
+.stack { display: grid; gap: var(--s3); } .stack label { display: grid; gap: 4px; }
+.row { display: flex; gap: var(--s2); align-items: center; } .row .input { flex: 1; min-width: 0; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--s3); }
+.plan-card { border: 1px solid var(--line); border-radius: var(--r); padding: var(--s4); display: flex; flex-direction: column; gap: 6px; background: var(--panel); }
+.plan-card.current { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.plan-card .price b { font-size: 1.5rem; } .plan-card .credits { font-weight: 600; color: var(--accent); }
+.plan-card ul { margin: 4px 0 8px; padding-left: 1.1em; font-size: .875rem; flex: 1; } .plan-card .btn { margin-top: auto; }
+.sec-title { font-size: .8125rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: var(--s2) 0 0; }
+.mem-list { display: grid; gap: 6px; max-height: 38vh; overflow: auto; }
+.mem { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 6px 10px; }
+.mem-text { flex: 1; min-width: 0; overflow-wrap: anywhere; cursor: text; } .mem .input { flex: 1; }
+.kind-badge { background: var(--accent-soft); border-radius: 99px; padding: 0 8px; font-size: .75rem; white-space: nowrap; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: var(--s2); }
+.tile { background: var(--panel-2); border-radius: var(--r-sm); padding: 10px; display: grid; } .tile b { font-size: 1.3rem; }
+.timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: .875rem; max-height: 28vh; overflow: auto; }

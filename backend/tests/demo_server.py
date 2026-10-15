@@ -5,7 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-os.environ.update(NO_AUTO_APP="1", DEV_MODE="1", BRAIN_POLICY="cheap")
+os.environ.update(NO_AUTO_APP="1", DEV_MODE="1", BRAIN_POLICY="cheap", ADMIN_EMAIL="admin@example.com", ADMIN_PASSWORD="admin-pass-123")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 

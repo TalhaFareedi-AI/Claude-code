@@ -96,3 +96,39 @@ See [the plan coverage matrix](docs/plan-coverage.md) for every plan section, te
 Payments (Stripe, Toss), real accounts and login (a cookie id is used), image generation, MCP servers, the
 sandboxed mini-app iframe (Level B charts), Langfuse, promptfoo test set, PPT page-image previews (LibreOffice),
 virus scanning of uploads (type and signature checks only), and a safety filter on messages and answers.
+
+
+## Accounts, admin, plans and memory
+
+Everything is stored in one SQLite file (`data/app.db`, WAL mode). **Back this file up.**
+
+**Users.** A visitor starts as a guest. "Sign up" turns the guest into an account (email and password,
+PBKDF2 hashes) and keeps all chats, memory and credits. Login sessions are random tokens in an httponly
+cookie (only their hash is stored). Failed logins are rate limited.
+
+**Admin console** at `/admin.html` (set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env`, or run
+`python scripts/create_admin.py you@example.com`):
+- Overview: users, active users, questions, credits used, AI cost, revenue, pending orders.
+- Users: search and sort; open one to see their full blueprint (totals, usage by mode and model, chats,
+  memories, purchases, credit history, activity timeline), change plan, block, set daily and monthly
+  credit limits, add or remove credits, extend a plan, write a note, or delete them and their data.
+- Queries: every question every user asked, with mode and credits; click one to read the whole chat
+  (opening a chat is logged in that user's own activity history).
+- Plans: edit price, credits, period, benefits and what each plan unlocks (brain tiers, modes, highest
+  effort, daily cap, storage, retention, rounds, tries). Create new plans and credit packs. The harness
+  enforces the new rules at once.
+- Purchases, Activity (everything everyone did), Models (price sync and approval).
+
+**Credits and plans (user side).** "Plans & credits" shows the plans and credit packs the admin set.
+There is no payment processor yet. `PAYMENT_PROVIDER=test` pays at once (no money moves, for demos);
+`manual` keeps the order pending until the admin confirms the money arrived. A paid plan lapses to Free
+after its period unless bought again; Free tops up to its allowance every 30 days.
+
+**Memory** works in three layers: (1) long-term notes about the user, saved after each turn by a cheap
+model, or at once when the user says "remember that ..."; (2) recall of related moments from the user's
+earlier chats through SQLite full-text search; (3) per-chat session notes plus a running summary, with the
+last 8 messages kept word for word. Only the relevant notes go on the AI's desk, inside a fixed budget.
+Users see, edit, pin, search, delete or switch off memory. Passwords, keys and card numbers are never saved.
+
+Run `python -m pytest` (192 tests), then `python backend/tests/demo_server.py` and
+`node scripts/platform_ui_check.cjs` (23 browser checks for sign-up, memory, plans and the admin console).

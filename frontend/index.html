@@ -25,12 +25,19 @@
       <p class="muted small" id="chat-empty">Your chats show up here.</p>
     </nav>
     <div class="side-section">
-      <button class="side-link" id="open-profile">🧠 What I remember about you</button>
+      <button class="side-link" id="open-profile">🧠 Memory</button>
+      <button class="side-link" id="open-activity">📊 My activity</button>
       <button class="side-link" id="open-files-btn">📁 My files</button>
+      <a class="side-link" id="admin-link" href="/admin.html" hidden>🛡️ Admin console</a>
+    </div>
+    <div class="account-box" id="account-box">
+      <div class="small"><b id="acct-name">Guest</b><br><span class="muted tiny" id="acct-email">Not signed in</span></div>
+      <div class="btn-row"><button class="btn small primary" id="acct-login">Log in / Sign up</button><button class="btn small" id="acct-logout" hidden>Log out</button></div>
     </div>
     <div class="wallet" id="wallet" aria-live="polite">
       <div class="wallet-top"><span class="plan-badge" id="plan-badge">free</span><span class="muted small" id="wallet-held"></span></div>
       <div class="wallet-bal"><strong id="wallet-bal">–</strong> <span class="muted">credits</span></div>
+      <button class="btn small block" id="buy-credits">💳 Plans &amp; credits</button>
       <div class="wallet-dev" id="wallet-dev" hidden>
         <label class="small muted" for="dev-plan">Test as plan</label>
         <select id="dev-plan" class="select small"><option>free</option><option>student</option><option>pro</option><option>school</option></select>

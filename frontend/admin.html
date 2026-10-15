@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Admin console</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a7f6f'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/admin.css">
+</head>
+<body class="admin">
+<div id="root"></div>
+<div class="sheet" id="modal" role="dialog" aria-modal="true" hidden>
+  <div class="sheet-card wide big"><div class="sheet-head"><h2 id="modal-title"></h2><button class="icon-btn" id="modal-close" aria-label="Close">✕</button></div><div class="sheet-body" id="modal-body"></div></div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<script type="module" src="js/admin.js"></script>
+</body>
+</html>
