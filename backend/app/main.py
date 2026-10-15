@@ -385,7 +385,7 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
     @app.get("/api/runs/{task_id}/usage")
     def usage(request: Request, task_id: str):
         user = who(request)
-        return db.all("SELECT step_no,role,model,input_tokens,cached_tokens,output_tokens,reasoning_tokens,cost_usd,credits_charged,finish_reason "
+        return db.all("SELECT step_no,role,model,input_tokens,cached_tokens,output_tokens,reasoning_tokens,cost_usd,credits_charged,finish_reason,latency_ms "
                       "FROM usage_events WHERE user_id=? AND task_id=? ORDER BY step_no", (user["id"], task_id))
 
     @app.get("/api/profile")

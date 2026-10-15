@@ -3,10 +3,11 @@ import { api, streamChat, uploadFile, ApiError } from './api.js';
 import { renderMarkdown } from './markdown.js';
 import { ArtifactStore, RunView, messageFooter, nextButtons } from './runview.js';
 import { FilesPanel } from './files.js';
-import { DEFAULTS, buildSettings, currentMode, modeName, modelLabel } from './settings.js';
+import { DEFAULTS, DISPLAY_DEFAULTS, ACCENTS, buildSettings, currentMode, modeName, modelLabel } from './settings.js';
 
 const store = safeStore();
 const S = { ...DEFAULTS, ...store.get('sh.settings', {}) };          // choices for the next message
+const display = { ...DISPLAY_DEFAULTS, ...store.get('sh.display', {}) };
 const app = {
   boot: null, convId: null, running: false, controller: null, taskId: null, lastPayload: null, artifacts: new ArtifactStore(),
   stick: true, uploads: [], est: null, estSeq: 0, lastAssistantId: null,
@@ -23,7 +24,7 @@ const STARTERS = [
 
 // ------------------------------------------------------------------ boot
 async function init() {
-  applyTheme(store.get('sh.theme', null));
+  applyTheme(store.get('sh.theme', null)); applyDisplay();
   try {
     app.boot = await api('/api/bootstrap');
   } catch (e) {
@@ -124,7 +125,7 @@ function renderHistory(m, isLast) {
       steps.disabled = true;
       try {
         const r = await api(`/api/runs/${m.task_id}/events`);
-        const rv = new RunView({ artifacts: app.artifacts, replay: true });
+        const rv = new RunView({ artifacts: app.artifacts, replay: true, display });
         r.events.forEach((e) => rv.handle(e)); rv.toggle(false);
         steps.replaceWith(rv.el);
       } catch (e) { toast(e.message); steps.disabled = false; }
@@ -177,6 +178,7 @@ async function send(opts = {}) {
   const msgEl = h('div', { class: 'msg assistant' });
   const run = new RunView({
     artifacts: app.artifacts,
+    display, onDetails: showDetails,
     onFile: () => { files.refresh(app.convId); openFilesPanelSoft(); },
     onAsk: (a) => handleAsk(a, msgEl),
   });
@@ -244,7 +246,7 @@ async function stopRun() {
 async function resumeRun(taskId, convId) {
   let after = 0, done = false;
   const msgEl = h('div', { class: 'msg assistant' });
-  const run = new RunView({ artifacts: app.artifacts, onAsk: () => {}, onFile: () => files.refresh(convId) });
+  const run = new RunView({ artifacts: app.artifacts, display, onDetails: showDetails, onAsk: () => {}, onFile: () => files.refresh(convId) });
   run.onPaint = () => scrollDown();
   msgEl.append(run.el); thread.append(msgEl);
   setRunning(true); app.taskId = taskId;
@@ -282,6 +284,7 @@ function paintChips() {
     chip('Brain', brainText, 'brain', 'hide-m'),
     chip('Effort', b.efforts.find((e) => e.id === S.effort)?.label || 'Auto', 'effort', 'hide-m'),
     chip('Tools', String(S.tools.length), 'tools', 'hide-m'),
+    chip('Display', 'View', 'display', 'hide-m'),
     h('button', { type: 'button', class: 'chip', onclick: () => openSettings('mode'), 'aria-label': 'All settings' }, '⚙ Settings'));
 }
 
@@ -316,12 +319,13 @@ function showSheet(id) { const s = $(id); s.hidden = false; s.dataset.prevFocus 
 function hideSheet(id) { const s = $(id); s.hidden = true; s._prev?.focus?.(); }
 
 function openSettings(focus) {
-  const body = buildSettings(app.boot, S, { focus, onChange: () => { persist(); paintChips(); scheduleEstimate(); } });
+  const body = buildSettings(app.boot, S, { focus, display, onDisplay: applyDisplay, onChange: () => { persist(); paintChips(); scheduleEstimate(); } });
   $('#settings-body').replaceChildren(body);
   showSheet('#settings');
 }
 
 function dialog(title, ...content) {
+  $('#dialog .sheet-card').classList.remove('wide');
   $('#dialog-title').textContent = title;
   $('#dialog-body').replaceChildren(...content);
   showSheet('#dialog');
@@ -358,6 +362,29 @@ function closeSide() { delete $('#app').dataset.side; $('#scrim').hidden = true;
 function openFilesPanel() { $('#app').dataset.files = 'open'; $('#files-toggle').setAttribute('aria-expanded', 'true'); if (matchMedia('(max-width: 1100px)').matches) $('#scrim').hidden = false; }
 function openFilesPanelSoft() { if (!matchMedia('(max-width: 1100px)').matches) openFilesPanel(); }
 function closeFilesPanel() { $('#app').dataset.files = 'closed'; $('#files-toggle').setAttribute('aria-expanded', 'false'); $('#scrim').hidden = true; }
+
+function applyDisplay() {
+  const r = document.documentElement;
+  r.dataset.anim = display.anim; r.dataset.size = display.size; r.dataset.density = display.density;
+  r.classList.toggle('no-timing', !display.timing); r.classList.toggle('no-thinking', !display.thinking);
+  const c = ACCENTS[display.accent] || ACCENTS.teal;
+  r.style.setProperty('--accent-user', c);
+  store.set('sh.display', display);
+}
+
+async function showDetails(taskId) {
+  let rows = [];
+  try { rows = await api(`/api/runs/${taskId}/usage`); } catch (e) { return toast(e.message); }
+  const sum = (k) => rows.reduce((a, r) => a + (r[k] || 0), 0);
+  const body = rows.length ? h('div', { class: 'md' }, h('table', null,
+    h('thead', null, h('tr', null, ['#', 'Role', 'Model', 'Time', 'In', 'Out', 'Thinking', 'Cost'].map((t) => h('th', { text: t })))),
+    h('tbody', null, rows.map((r) => h('tr', null, h('td', { text: r.step_no }), h('td', { text: r.role }), h('td', { text: r.model }), h('td', { text: ((r.latency_ms || 0) / 1000).toFixed(1) + ' s' }),
+      h('td', { text: r.input_tokens + r.cached_tokens }), h('td', { text: r.output_tokens }), h('td', { text: r.reasoning_tokens }), h('td', { text: '$' + r.cost_usd.toFixed(5) })))),
+    h('tfoot', null, h('tr', null, h('th', { text: 'Total', colspan: 3 }), h('th', { text: (sum('latency_ms') / 1000).toFixed(1) + ' s' }), h('th', { text: sum('input_tokens') + sum('cached_tokens') }), h('th', { text: sum('output_tokens') }), h('th', { text: sum('reasoning_tokens') }), h('th', { text: '$' + sum('cost_usd').toFixed(5) })))))
+    : h('p', { class: 'muted', text: 'No AI calls were recorded for this run.' });
+  dialog('Run details', h('p', { class: 'muted small', text: `${rows.length} AI call(s). Credits charged: ${sum('credits_charged')}.` }), body);
+  $('#dialog .sheet-card').classList.add('wide');
+}
 
 function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; }
 

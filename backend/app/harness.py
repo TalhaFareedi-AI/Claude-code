@@ -145,7 +145,7 @@ class Meter:
         return credits_for_cost(self.usd + extra_usd)
 
     async def record(self, role: str, model: dict, res: LLMResult, *, tool_units: dict | None = None,
-                     extra_usd: float = 0.0, billable: bool = True) -> int:
+                     extra_usd: float = 0.0, billable: bool = True, latency_ms: int = 0) -> int:
         async with self.lock:
             u = res.usage
             if u.cost is not None:
@@ -163,10 +163,10 @@ class Meter:
             self.step_no += 1
             self.db.run(
                 "INSERT INTO usage_events(user_id,task_id,step_no,role,model,input_tokens,cached_tokens,output_tokens,"
-                "reasoning_tokens,tool_units,cost_usd,cost_source,credits_charged,finish_reason,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "reasoning_tokens,tool_units,cost_usd,cost_source,credits_charged,finish_reason,created_at,latency_ms) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (self.user_id, self.task_id, self.step_no, role, res.model, u.prompt, u.cached, u.completion,
-                 u.reasoning, jdump(tool_units or {}), float(cost), src, delta, res.finish_reason, now()))
+                 u.reasoning, jdump(tool_units or {}), float(cost), src, delta, res.finish_reason, now(), latency_ms))
             if billable:
                 self.db.run("UPDATE tasks SET credits_used=?, usd_used=? WHERE id=?",
                             (self.credits, float(self.usd), self.task_id))
@@ -316,7 +316,10 @@ class RunContext:
         except OpenRouterError:
             raise
         used = catalog.get(self.db, res.model) or model
-        await self.meter.record(role, used, res, extra_usd=extra_usd)
+        ms = int((time.monotonic() - t0) * 1000)
+        await self.meter.record(role, used, res, extra_usd=extra_usd, latency_ms=ms)
+        self.emit("call", role=role, model=used["name"], ms=ms, tokens_in=res.usage.prompt + res.usage.cached,
+                  tokens_out=res.usage.completion, thinking=res.usage.reasoning, usd=round(float(self.meter.usd), 6))
         if res.reasoning_text or (res.usage.reasoning and effort not in ("off", "auto")):
             self.emit("thinking", seconds=round(time.monotonic() - t0), tokens=res.usage.reasoning,
                       summary=res.reasoning_text[:400])

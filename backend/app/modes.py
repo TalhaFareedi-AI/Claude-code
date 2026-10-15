@@ -13,9 +13,9 @@ PRO = ["pro", "school"]
 MODES = [
     {"id": "fast", "name": "Fast", "blurb": "One quick answer, no scrap paper", "runner": "single", "big": False,
      "steps": ["answer"], "slots": {"answer": "tier:quick"}, "reasoning": {"answer": "off"},
-     "max_tokens": {"answer": 1200}, "params": {}, "max_credits": 10, "plans": ALL},
+     "max_tokens": {"answer": 500}, "params": {}, "max_credits": 10, "plans": ALL},
     {"id": "normal", "name": "Normal", "blurb": "One answer with a little thinking", "runner": "single", "big": False,
-     "steps": ["answer"], "slots": {"answer": "tier:smart"}, "reasoning": {"answer": "low"},
+     "steps": ["answer"], "slots": {"answer": "tier:smart"}, "reasoning": {"answer": "off"},
      "max_tokens": {"answer": 2500}, "params": {}, "max_credits": 30, "plans": ALL},
     {"id": "deep", "name": "Deep", "blurb": "Plan, do the steps, check", "runner": "deep", "big": True,
      "steps": ["planner", "worker", "checker", "answer"],

@@ -2,6 +2,9 @@
 // from the server, so a new mode or model appears here without a new release.
 import { h, $ } from './dom.js';
 
+export const DISPLAY_DEFAULTS = { anim: 'on', open: 'running', timing: true, thinking: true, size: 'm', density: 'cozy', accent: 'teal' };
+export const ACCENTS = { teal: '#2a7f6f', blue: '#2f6fd1', violet: '#7a55c9', orange: '#c4622d', rose: '#c2415d' };
+
 export const DEFAULTS = {
   mode: 'auto', brains: {}, effort: 'auto', rounds: null, tries: null, cap: null,
   tools: ['chart', 'diagram', 'documents', 'ppt', 'web'], skills: null, private: false,
@@ -32,7 +35,7 @@ function brainSelect(boot, value, onPick, { label }) {
   return sel;
 }
 
-export function buildSettings(boot, S, { onChange, focus }) {
+export function buildSettings(boot, S, { onChange, focus, display, onDisplay }) {
   const body = h('div');
   const mode = currentMode(boot, S);
   const rules = boot.plans[boot.user.plan].rules;
@@ -121,6 +124,21 @@ export function buildSettings(boot, S, { onChange, focus }) {
       cb.addEventListener('change', () => { const cur = new Set(S.skills ?? boot.skills.map((x) => x.name)); cb.checked ? cur.add(s.name) : cur.delete(s.name); S.skills = [...cur]; onChange(); });
       skillBox.append(h('label', { class: 'switch', for: `sk-${s.name}`, title: s.description }, cb, h('span', null, h('b', { text: s.name }), ' ', h('span', { class: 'muted small', text: s.description.split('. ')[0] }))));
     }
+    // --- Display (how it looks and moves)
+    const dset = (k, v) => { display[k] = v; onDisplay(); render(); };
+    const choice = (label, key, opts) => h('div', { class: 'sec-row' }, h('div', { class: 'small', text: label }),
+      h('div', { class: 'seg', role: 'group', 'aria-label': label }, opts.map(([v, t]) => h('button', { type: 'button', text: t, 'aria-pressed': String(display[key] === v), onclick: () => dset(key, v) }))));
+    const sw = (label, key) => { const cb = h('input', { type: 'checkbox', id: `d-${key}`, checked: display[key] || null }); cb.addEventListener('change', () => dset(key, cb.checked)); return h('label', { class: 'switch', for: `d-${key}` }, cb, label); };
+    body.append(h('section', { class: 'sec', id: 'sec-display' }, h('h3', { text: 'Display: how it looks and moves' }),
+      choice('Animations', 'anim', [['on', 'On'], ['off', 'Off']]),
+      choice('Steps panel', 'open', [['running', 'Open while running'], ['always', 'Always open'], ['never', 'Always closed']]),
+      sw('Show time and token details for every AI call', 'timing'), sw('Show thinking summaries', 'thinking'),
+      choice('Text size', 'size', [['s', 'Small'], ['m', 'Medium'], ['l', 'Large']]),
+      choice('Spacing', 'density', [['compact', 'Compact'], ['cozy', 'Comfortable']]),
+      h('div', { class: 'sec-row' }, h('div', { class: 'small', text: 'Accent color' }), h('div', { class: 'seg' }, Object.entries(ACCENTS).map(([k, c]) =>
+        h('button', { type: 'button', class: 'swatch', style: `background:${c}`, 'aria-label': k, 'aria-pressed': String(display.accent === k), onclick: () => dset('accent', k) })))),
+      h('button', { type: 'button', class: 'btn small', text: 'Reset display', onclick: () => { Object.assign(display, DISPLAY_DEFAULTS); onDisplay(); render(); } })));
+
     body.append(h('section', { class: 'sec', id: 'sec-skills' }, h('h3', { text: 'Skills (recipe cards, opened only when needed)' }), skillBox));
   }
   render();

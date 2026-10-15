@@ -25,7 +25,8 @@ export class ArtifactStore {
 }
 
 export class RunView {
-  constructor({ artifacts, onFile, onAsk, replay = false }) {
+  constructor({ artifacts, onFile, onAsk, onDetails, display = {}, replay = false }) {
+    this.display = display; this.onDetails = onDetails || (() => {}); this.timers = new Map(); this.doneCount = 0; this.stepCount = 0; this.calls = [];
     this.artifacts = artifacts; this.onFile = onFile || (() => {}); this.onAsk = onAsk || (() => {}); this.replay = replay;
     this.planEl = null; this.planItems = []; this.stepsEl = h('ul', { class: 'plan' }); this.tools = new Map();
     this.title = h('span', { class: 'run-title', text: 'Starting…' });
@@ -33,8 +34,11 @@ export class RunView {
     this.dot = h('span', { class: 'dot', 'aria-hidden': 'true' });
     this.brains = h('div', { class: 'run-brains' });
     this.body = h('div', { class: 'run-body', 'aria-live': 'polite' }, this.brains);
+    this.bar = h('i');
+    this.progress = h('div', { class: 'progress indeterminate', role: 'progressbar', 'aria-label': 'Progress', 'aria-valuemin': '0', 'aria-valuemax': '100' }, this.bar);
     this.head = h('button', { type: 'button', class: 'run-head', 'aria-expanded': 'true', onclick: () => this.toggle() }, this.dot, this.title, this.cost);
-    this.el = h('div', { class: 'run working' }, this.head, this.body);
+    this.el = h('div', { class: 'run working' }, this.head, this.progress, this.body);
+    if (display.open === 'never') this.toggle(true);
     this.status = 'working'; this.taskId = null; this.max = 0; this.used = 0;
     this.text = ''; this.hadDelta = false; this.answerEl = null; this.footEl = null; this.messageId = null; this.buttons = [];
     this.files = []; this.sawAsk = false; this.sawError = false; this.stepsShown = false;
@@ -47,9 +51,38 @@ export class RunView {
   }
 
   setCost(used, max) {
+    const from = this.used || 0;
     this.used = used; this.max = max;
-    this.cost.textContent = max ? `Used ${used} credit${used === 1 ? '' : 's'}, at most ${max}` : `Used ${used}`;
+    const paint = (n) => { this.cost.textContent = max ? `Used ${n} credit${n === 1 ? '' : 's'}, at most ${max}` : `Used ${n}`; };
+    if (this.display.anim === 'off' || from === used || this.replay) return paint(used);
+    const t0 = performance.now();
+    const tick = (t) => { const k = Math.min(1, (t - t0) / 350); paint(Math.round(from + (used - from) * k)); if (k < 1) requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
   }
+
+  setProgress(done, total) {
+    const known = total > 0;
+    this.progress.classList.toggle('indeterminate', !known && this.status === 'working');
+    const pct = this.status === 'done' ? 100 : known ? Math.round((done / total) * 100) : Math.min(90, 12 + done * 14);
+    this.bar.style.width = pct + '%';
+    this.progress.setAttribute('aria-valuenow', String(pct));
+  }
+
+  _startTimer(item, step) {
+    const t = h('span', { class: 't', text: '0.0 s' });
+    item.append(t);
+    const t0 = performance.now();
+    const id = setInterval(() => { t.textContent = ((performance.now() - t0) / 1000).toFixed(1) + ' s'; }, 100);
+    this.timers.set(step, { id, t, t0 });
+  }
+  _stopTimer(step) {
+    const x = this.timers.get(step);
+    if (!x) return;
+    clearInterval(x.id);
+    x.t.textContent = ((performance.now() - x.t0) / 1000).toFixed(1) + ' s';
+    this.timers.delete(step);
+  }
+  _stopAll() { for (const k of [...this.timers.keys()]) this._stopTimer(k); }
 
   line(cls, text) { const el = h('div', { class: cls, text }); this.body.append(el); return el; }
 
@@ -70,22 +103,28 @@ export class RunView {
     this.planEl?.remove();
     this.planItems = ev.steps.map((s, i) => h('li', { class: i < (ev.done || 0) ? 'done' : '' }, h('span', { class: 'tick', text: i < (ev.done || 0) ? '✓' : '○' }), h('span', { text: s.title })));
     this.planEl = h('ol', { class: 'plan', 'aria-label': 'Plan' }, this.planItems);
-    this.body.insertBefore(this.planEl, this.brains.nextSibling);
+    if (this.stepsShown) this.stepsEl.after(this.planEl); else this.body.insertBefore(this.planEl, this.brains.nextSibling);
+    this.planTotal = ev.steps.length; this.doneCount = ev.done || 0; this.setProgress(this.doneCount, this.planTotal);
   }
   _planItem(n) { return this.planItems[n - 1]; }
   on_step_start(ev) {
     const item = this._planItem(ev.step);
-    if (item) { item.className = 'active'; item.firstChild.textContent = '▶'; return; }
+    if (item) { item.className = 'active'; item.firstChild.textContent = ''; this._startTimer(item, ev.step); return; }
     if (!this.stepsShown) { this.body.append(this.stepsEl); this.stepsShown = true; }
-    const li = h('li', { class: 'active', dataset: { step: ev.step } }, h('span', { class: 'tick', text: '▶' }), h('span', { text: ev.title }));
+    this.stepCount++;
+    const li = h('li', { class: 'active', dataset: { step: ev.step } }, h('span', { class: 'tick', text: '' }), h('span', { class: 'what', text: ev.title }));
     this.stepsEl.append(li);
+    this._startTimer(li, ev.step);
+    this.setProgress(this.doneCount, this.planTotal || 0);
   }
   on_step_done(ev) {
     let item = this._planItem(ev.step);
     if (!item) item = this.stepsEl.querySelector(`[data-step="${ev.step}"]`);
     if (!item) return;
+    this._stopTimer(ev.step);
     item.className = ev.ok === false ? 'fail' : 'done';
     item.firstChild.textContent = ev.ok === false ? '✗' : '✓';
+    this.doneCount++; this.setProgress(this.doneCount, this.planTotal || 0);
     if (ev.score) item.append(h('span', { class: 'round-chip', text: `score ${ev.score}/10` }));
     if (ev.detail && !item.querySelector('details')) {
       item.append(h('details', { class: 'fold' }, h('summary', { text: 'Details' }), h('pre', { text: String(ev.detail).slice(0, 800) })));
@@ -113,6 +152,12 @@ export class RunView {
   on_skill_used(ev) { this.line('think', `🧩 Used skill: ${ev.name}`); }
   on_notice(ev) { this.line('notice', ev.text); }
   on_cost(ev) { this.setCost(ev.used, ev.max); }
+  on_call(ev) {
+    this.calls.push(ev);
+    const parts = [`${ev.model}`, `${(ev.ms / 1000).toFixed(1)} s`, `${ev.tokens_in}→${ev.tokens_out} tokens`];
+    if (ev.thinking) parts.push(`${ev.thinking} thinking`);
+    this.body.append(h('div', { class: 'callrow', text: '⚡ ' + parts.join(' · ') }));
+  }
   on_check() {}
   on_settled(ev) { this.charged = ev.charged; }
   on_ask(ev) {
@@ -170,8 +215,14 @@ export class RunView {
   on_answer(ev) { this.messageId = ev.message_id; this.buttons = ev.buttons || []; this.credits = ev.credits; this.notices = ev.notices || []; }
   on_run_done(ev) {
     this.status = ev.status;
+    this._stopAll();
     this.el.classList.remove('working');
-    if (ev.status === 'done' && !this.sawError && !this.sawAsk) this.toggle(true);
+    this.setProgress(this.doneCount, this.planTotal || 0);
+    this.progress.classList.remove('indeterminate');
+    if (ev.status !== 'done') this.progress.classList.add('stopped');
+    if (this.taskId && !this.replay) this.body.append(h('button', { type: 'button', class: 'btn small', text: '🔍 Run details', onclick: () => this.onDetails(this.taskId) }));
+    const keep = this.display.open === 'always';
+    if (ev.status === 'done' && !this.sawError && !this.sawAsk && !keep) this.toggle(true);
     this.title.textContent = `${this.title.textContent.split(' · ')[0]} · ${({ done: 'finished', stopped: 'stopped', paused: 'paused', error: 'failed', awaiting_confirm: 'waiting for your yes', blocked: 'not started' })[ev.status] || ev.status}`;
     this.setCost(ev.used, ev.max);
     if (!this.replay) { if (this._raf) cancelAnimationFrame(this._raf); this.paint(true); }

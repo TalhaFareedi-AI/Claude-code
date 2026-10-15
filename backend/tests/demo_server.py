@@ -20,7 +20,7 @@ from fake_openrouter import FakeOpenRouter
 tmp = Path(tempfile.mkdtemp())
 settings.workspace_root = tmp / "ws"
 fake = FakeOpenRouter()
-fake.delay = 0
+fake.delay = float(os.environ.get('FAKE_DELAY', '0.6'))
 llm = OpenRouter(api_key="demo-key", base_url="http://fake", transport=fake.transport())
 app = create_app(llm=llm, db=DB(str(tmp / "demo.db")))
 

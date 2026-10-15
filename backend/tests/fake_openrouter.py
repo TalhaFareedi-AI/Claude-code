@@ -1,6 +1,7 @@
 """A local stand-in for OpenRouter, used ONLY by tests. It follows the real request/response shape
 (chat/completions with usage.cost, streaming, models list) and records every request so tests can
 check the safety rails (max_tokens, provider.data_collection, reasoning, fallbacks)."""
+import asyncio
 import json
 
 import httpx
@@ -26,6 +27,7 @@ class FakeOpenRouter:
         self.critic_scores = [5, 9]
         self.critic_calls = 0
         self.cost_mult = 1.0                    # make calls cost more, to hit the credit caps
+        self.delay = 0.0                        # seconds per call, to watch animations
         self.no_cost = False                    # drop usage.cost to test the table fallback
         self.app = self._build()
 
@@ -138,6 +140,8 @@ class FakeOpenRouter:
         async def chat(request: Request):
             body = await request.json()
             self.requests.append(body)
+            if self.delay:
+                await asyncio.sleep(self.delay)
             model = body["model"]
             if self.fail.get(model, 0) > 0:
                 self.fail[model] -= 1

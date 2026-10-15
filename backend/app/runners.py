@@ -46,7 +46,8 @@ def step_done(ctx: RunContext, n: int, ok: bool = True, **kw) -> None:
 async def run_single(ctx: RunContext) -> RunResult:
     model = ctx.brain("answer")
     step(ctx, 1, "Answering with " + model["name"])
-    res = await ctx.call("answer", model, ctx.base_messages(), max_tokens=mt(ctx, "answer"),
+    brief = "Fast mode: answer in at most 90 words. One idea, one tiny example." if ctx.mode["id"] == "fast" else ""
+    res = await ctx.call("answer", model, ctx.base_messages(brief), max_tokens=mt(ctx, "answer"),
                          effort=ctx.effort("answer"), stream=True)
     if not res.text.strip():  # a host sent nothing: one plain retry, thinking off
         res = await ctx.call("answer", model, ctx.base_messages(), max_tokens=mt(ctx, "answer"), effort="off")

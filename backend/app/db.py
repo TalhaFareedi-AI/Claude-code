@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS usage_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, task_id TEXT, step_no INTEGER,
   role TEXT, model TEXT, input_tokens INTEGER, cached_tokens INTEGER, output_tokens INTEGER,
   reasoning_tokens INTEGER, tool_units TEXT, cost_usd REAL, cost_source TEXT,
-  credits_charged INTEGER, finish_reason TEXT, created_at REAL);
+  credits_charged INTEGER, finish_reason TEXT, created_at REAL, latency_ms INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS credit_ledger(
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, delta INTEGER, reason TEXT,
   task_id TEXT, created_at REAL);
@@ -65,6 +65,10 @@ class DB:
         self.lock = threading.RLock()
         with self.lock:
             self.conn.executescript(SCHEMA)
+            try:  # older databases: add the timing column
+                self.conn.execute("ALTER TABLE usage_events ADD COLUMN latency_ms INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
             self.conn.commit()
 
     def run(self, sql: str, params=()) -> sqlite3.Cursor:
