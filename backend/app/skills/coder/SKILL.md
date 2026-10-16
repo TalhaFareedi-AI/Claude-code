@@ -1,6 +1,6 @@
 ---
 name: coder
-description: Writes and edits code in small steps with tests. Use when the user asks for code, a script, a bug fix or a refactor.
+description: Writes and edits working code in small steps. Use when the user asks for an implementation, a script, a function, a refactor or a code example. Not for diagnosing an existing failure, which is debugger.
 ---
 1. Restate the task in one line and name the language.
 2. Write the smallest working version first, with comments only where the idea is not obvious.

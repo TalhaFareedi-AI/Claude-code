@@ -153,7 +153,10 @@ async def test_bootstrap_lists_modes_models_efforts_for_plan(client):
     assert {"overthink", "council", "think_team"} <= free_locked
     assert {e["id"]: e["allowed"] for e in b["efforts"]}["max"] is False
     assert any(m["lab"] == "DeepSeek" and m["region"] == "china" for m in b["models"])
-    assert b["wallet"]["balance"] == 100 and len(b["skills"]) == 7
+    assert b["wallet"]["balance"] == 100
+    names = {s["name"] for s in b["skills"]}
+    assert {"architect", "coder", "debugger", "math-solver", "researcher"} <= names
+    assert all(s["description"] for s in b["skills"])      # the description is what makes a skill trigger
 
 
 async def test_estimate_endpoint_is_live(client):
@@ -198,7 +201,7 @@ async def test_file_links_download_and_other_users_are_refused(client):
     await client.post("/api/dev/plan", json={"plan": "student"}, headers=h)
     await client.post("/api/dev/topup", json={"credits": 500}, headers=h)
     ev = await sse_events(client, {"message": "Make a 4 slides PPT on plants", "mode": "auto", "confirm": True}, h)
-    f = [e for e in ev if e["type"] == "file_created"][0]["file"]
+    f = [e["file"] for e in ev if e["type"] == "file_created" and e["file"]["name"].endswith(".pptx")][0]
     link = (await client.get(f"/api/files/{f['id']}/link", headers=h)).json()["url"]
     dl = await client.get(link, headers=h)
     assert dl.status_code == 200 and dl.content[:2] == b"PK"

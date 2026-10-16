@@ -1,5 +1,7 @@
 """FastAPI app. Web and phone app both read the same lists (modes, models) from here."""
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -13,15 +15,32 @@ from pathlib import Path
 from fastapi import Body, Cookie, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+import pydantic as _pyd
 
-from . import catalog, modes as modes_mod, skills, wallet, workspace
+_PYD_V1 = getattr(_pyd, "__version__", "2").startswith("1.")
+
+
+def Field(*args, **kw):
+    if _PYD_V1:
+        if "pattern" in kw:
+            kw["regex"] = kw.pop("pattern")
+        if "max_items" in kw:
+            kw.pop("max_length", None)
+    else:
+        if "max_items" in kw:
+            kw["max_length"] = kw.pop("max_items")
+    return _pyd.Field(*args, **kw)
+
+
+from . import accounts, activity, billing, catalog, memory, modes as modes_mod, plans, recursive, skills, team as team_mod, uiprefs, wallet, workspace
 from .config import ROOT, settings
 from .db import DB, jdump, jload, now
 from .harness import Harness, RunContext, RunRequest, UserError
 from .openrouter import OpenRouter, OpenRouterError
-from .plans import PLAN_RULES, rules as plan_rules
-from .pricing import EFFORT_ORDER, PLAN_MAX_EFFORT
+from .plans import rules as plan_rules
+from .pricing import EFFORT_ORDER
+from .tools import pdf_builder
 
 FRONTEND = ROOT / "frontend"
 TOOLS = [
@@ -29,6 +48,9 @@ TOOLS = [
     {"id": "diagram", "label": "Diagrams", "default": True},
     {"id": "documents", "label": "Word documents", "default": True},
     {"id": "ppt", "label": "PowerPoint", "default": True},
+    {"id": "flashcards", "label": "Flashcards", "default": True},
+    {"id": "images", "label": "Generated images", "default": False},
+    {"id": "table", "label": "Sortable tables", "default": True},
     {"id": "web", "label": "Web search", "default": True},
 ]
 EFFORTS = [{"id": "auto", "label": "Auto"}, {"id": "off", "label": "Off"}, {"id": "low", "label": "Low"},
@@ -41,8 +63,15 @@ ROLE_LABELS = {"answer": "Answerer", "write": "Writer", "critic": "Critic", "thi
 class ChatBody(BaseModel):
     message: str = Field("", max_length=12000)
     conversation_id: str | None = None
+    request_id: str | None = Field(None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     mode: str = "auto"
     brains: dict = Field(default_factory=dict)
+    team: dict = Field(default_factory=dict)
+    teacher_enabled: bool = False
+    length: str = Field("auto", pattern=r"^(auto|short|medium|long)$")
+    image_model: str | None = Field(None, max_length=200)
+    teacher_model: str | None = Field(None, max_length=200)
+    approved_plan: list[dict] | None = Field(None, max_length=12, max_items=12)
     effort: str = "auto"
     rounds: int | None = None
     tries: int | None = None
@@ -72,12 +101,20 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
     db = db or DB(settings.db_path)
     catalog.seed(db)
     modes_mod.seed(db)
+    plans.bind(db, modes_mod.listing(db))
+    recursive.seed(db)
+    if settings.admin_email and settings.admin_password:
+        try:
+            accounts.ensure_admin(db, settings.admin_email, settings.admin_password)
+        except accounts.AuthError as exc:
+            print(f"ADMIN_EMAIL/ADMIN_PASSWORD ignored: {exc}")
     llm = llm or OpenRouter()
     harness = Harness(db, llm)
     hits: dict[str, deque] = defaultdict(deque)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        harness.recover_interrupted()
         async def nightly():
             while True:
                 try:
@@ -105,22 +142,51 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
                                                    "script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
         return resp
 
+    @app.get("/healthz")
+    def healthz():
+        """For the host's health check: confirms the server is up and the database answers."""
+        db.scalar("SELECT 1")
+        return {"ok": True}
+
+    if settings.unlock_all and not settings.dev_mode:
+        print("WARNING: UNLOCK_ALL=1 gives EVERY visitor all features and 100,000 free credits on your OpenRouter key. "
+              "On a public site use UNLOCK_ALL=admin.")
+
     # ---- who is this -------------------------------------------------------------------
     def who(request: Request, response: Response | None = None) -> dict:
-        uid = request.cookies.get("uid")
+        session_user = accounts.session_user(db, request.cookies.get("sid"))
+        if session_user:
+            request.state.user_id = session_user["id"]
+            if session_user.get("status") == "blocked":
+                raise HTTPException(403, "This account is blocked. Contact support.")
+            return harness.get_user(session_user["id"])
+        cookie = request.cookies.get("uid", "")
+        raw_uid, _, signature = cookie.partition(".")
+        expected = hmac.new(settings.secret.encode(), raw_uid.encode(), hashlib.sha256).hexdigest()
+        uid = raw_uid if re.fullmatch(r"[a-f0-9]{64}", signature) and hmac.compare_digest(signature, expected) else None
         if settings.dev_mode and request.headers.get("x-user-id"):
             uid = request.headers["x-user-id"]
         if not uid or not re.fullmatch(r"u_[A-Za-z0-9_-]{4,40}", uid):
             uid = "u_" + uuid.uuid4().hex[:12]
             request.state.new_uid = uid
-        return harness.get_user(uid)
+        user = harness.get_user(uid)
+        if user.get("email") and not settings.dev_mode:
+            # A registered account must sign in; a guest cookie cannot open it.
+            uid = "u_" + uuid.uuid4().hex[:12]
+            request.state.new_uid = uid
+            user = harness.get_user(uid)
+        if user.get("status") == "blocked":
+            raise HTTPException(403, "This account is blocked. Contact support.")
+        return user
 
     @app.middleware("http")
     async def set_cookie(request: Request, call_next):
         resp = await call_next(request)
         uid = getattr(request.state, "new_uid", None)
         if uid:
-            resp.set_cookie("uid", uid, max_age=365 * 86400, httponly=True, samesite="lax")
+            signature = hmac.new(settings.secret.encode(), uid.encode(), hashlib.sha256).hexdigest()
+            resp.set_cookie("uid", uid + "." + signature, max_age=365 * 86400, httponly=True,
+                            secure=request.url.scheme == "https", samesite="lax")
         return resp
 
     def plan_modes(user: dict) -> list[dict]:
@@ -143,22 +209,41 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
                            "thinks": bool(m["thinks"]), "level": price_level(m), "price_in": m["price_in"],
                            "price_out": m["price_out"], "private": bool(m["private_route"]),
                            "allowed": m["tier"] in rl["tiers"]})
-        top = PLAN_MAX_EFFORT[user["plan"]]
+        top = rl.get("max_effort", "low")
         efforts = [{**e, "allowed": e["id"] == "auto" or EFFORT_ORDER.index(e["id"]) <= EFFORT_ORDER.index(top)} for e in EFFORTS]
         return {
             "app": settings.app_title,
             "user": {"id": user["id"], "name": user["name"], "plan": user["plan"], "auto_spend": user["auto_spend"],
-                     "private_route": bool(user["private_route"])},
+                     "private_route": bool(user["private_route"]), "email": user.get("email"), "registered": bool(user.get("email")),
+                     "is_admin": user.get("role") == "admin", "memory_enabled": bool(user.get("memory_enabled", 1)),
+                     "plan_renews_at": user.get("plan_renews_at"), "daily_limit": user.get("daily_limit"),
+                     "monthly_limit": user.get("monthly_limit")},
+            "limits": {"left": harness.remaining_limit(user)},
+            "payment_provider": settings.payment_provider,
             "wallet": {"balance": wallet.balance(db, user["id"]), "held": wallet.held(db, user["id"]),
                        "available": wallet.available(db, user["id"])},
-            "plans": {k: {**v, **{"rules": PLAN_RULES[k]}} for k, v in wallet.PLANS.items()},
+            "plans": {p["id"]: {"name": p["name"], "credits": p["credits"], "price": p["price_usd"], "rules": plans.rules(p["id"])}
+                      for p in plans.all_plans(True) if p["kind"] == "subscription"},
             "modes": plan_modes(user),
             "models": models,
             "efforts": efforts,
+            "lengths": [{"id": "auto", "label": "Auto"}, {"id": "short", "label": "Short"},
+                        {"id": "medium", "label": "Normal"}, {"id": "long", "label": "Long"}],
             "tools": TOOLS,
+            "image_models": [{"id": m["id"], "name": m["name"], "lab": m["lab"], "price_out": m["price_out"]}
+                             for m in catalog.image_models(db)],
+            "image_model": user.get("image_model"),
+            "ui_prefs": uiprefs.clean(jload(user.get("ui_prefs"), {})),
+            "ui_defaults": uiprefs.DEFAULTS,
+            "ui_choices": {**uiprefs.CHOICES, "chips": uiprefs.CHIPS, "side_items": uiprefs.SIDE_ITEMS, "accents": uiprefs.ACCENTS},
             "skills": [{"name": s.name, "description": s.description} for s in skills.all_skills().values()],
             "roles": ROLE_LABELS,
+            "critic_roles": [{"id": k, "question": v} for k, v in team_mod.CRITIC_ROLES.items()],
+            "self_improve_modes": [{"id": "off", "label": "Off: plain harness"},
+                                   {"id": "learned", "label": "Learned: apply lesson library"},
+                                   {"id": "recursive", "label": "Recursive (Propose, Probe, Compose)"}],
             "dev_mode": settings.dev_mode,
+            "unlock_all": settings.unlock_all,
             "has_key": bool(llm.api_key),
             "catalog_sync": app.state.last_sync,
         }
@@ -173,13 +258,16 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         try:
             mode = harness.choose_mode(req, route, user["plan"])
             ctx = RunContext(harness, user, task, req, mode, NullEmitter())
+            ctx.intent = route["intent"]
+            ctx.needs = route.get("needs", [])
             est = harness.make_estimate(ctx, route)
         except (UserError, LookupError) as e:
             raise HTTPException(400, str(e))
         cap = req.max_credits or min(mode["max_credits"], max(user["auto_spend"], est["credits"]))
+        max_cap = min(mode["max_credits"], ctx.team.get("max_credits") or mode["max_credits"])
         brains = {r: [m["name"] for m in ctx.brains(r)] for r in mode["slots"]}
         return {"mode": mode["id"], "mode_name": mode["name"], "credits": est["credits"], "usd": est["usd"],
-                "cap": max(1, min(cap, mode["max_credits"])), "max_cap": mode["max_credits"], "big": mode["big"],
+                "cap": max(1, min(cap, max_cap)), "max_cap": max_cap, "big": mode["big"],
                 "needs_confirm": mode["big"] and est["credits"] > user["auto_spend"], "brains": brains,
                 "rounds": est.get("rounds"), "tries": est.get("tries"), "parts": est["parts"]}
 
@@ -188,7 +276,9 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
                           max_credits=b.max_credits, tools=b.tools if b.tools is not None else [t["id"] for t in TOOLS if t["default"]],
                           skills=b.skills, intent=b.intent, conversation_id=b.conversation_id, confirm=b.confirm,
                           continue_task=b.continue_task, extra_credits=b.extra_credits, private_route=b.private_route,
-                          target_message=b.target_message, uploads=b.uploads)
+                          target_message=b.target_message, uploads=b.uploads, team=b.team,
+                          teacher_enabled=b.teacher_enabled, teacher_model=b.teacher_model, approved_plan=b.approved_plan, length=b.length, image_model=b.image_model,
+                          request_id=b.request_id)
 
     # ---- chat: a stream of small events -----------------------------------------------------------------
     @app.post("/api/chat")
@@ -205,7 +295,10 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         req = to_request(body)
         if body.continue_task and not body.message.strip():
             req.message = "Continue the task."
-        task_id, em = await harness.start(user["id"], req)
+        try:
+            task_id, em = await harness.start(user["id"], req)
+        except UserError as exc:
+            raise HTTPException(400, str(exc))
 
         async def gen():
             yield sse({"seq": 0, "type": "hello", "task_id": task_id, "conversation_id": req.conversation_id})
@@ -315,6 +408,27 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         own_file(user, fid)
         return {"url": f"/download?token={workspace.sign(fid, user['id'])}", "expires_in": settings.link_ttl_s}
 
+    @app.post("/api/files/{fid}/pdf")
+    def export_pdf(request: Request, fid: str):
+        """Export a workspace document (.docx or .md) to a downloadable PDF file (section 6, page 25)."""
+        user = who(request)
+        r = own_file(user, fid)
+        src = workspace.path_of(r)
+        out_path = src.with_suffix(".pdf")
+        if r["kind"] == "docx":
+            a = db.one("SELECT data FROM artifacts WHERE user_id=? AND task_id=? AND kind='doc_json' ORDER BY created_at DESC",
+                       (user["id"], r["task_id"]))
+            doc = jload(a["data"], {}) if a else {"title": Path(r["name"]).stem, "sections": [{"heading": "Document", "paragraphs": ["Exported from Word document."]}]}
+            pdf_builder.build_from_doc(doc, out_path)
+        elif r["kind"] in ("doc", "slides", "md", "txt"):
+            md_txt = src.read_text(errors="replace") if src.exists() else ""
+            pdf_builder.build_from_markdown(Path(r["name"]).stem.replace("-", " ").title(), md_txt, out_path)
+        else:
+            raise HTTPException(400, "Only documents and notes can be exported to PDF.")
+        workspace.check_storage(db, user["id"], user["plan"], out_path.stat().st_size)
+        rec = workspace.register(db, user["id"], r["task_id"], out_path, "pdf", user["plan"])
+        return {"file": rec, "url": f"/download?token={workspace.sign(rec['id'], user['id'])}"}
+
     @app.get("/download")
     def download(request: Request, token: str):
         user = who(request)
@@ -344,6 +458,9 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
                     "items": [{"title": x.get("title") or x.get("heading"), "lines": (x.get("bullets") or x.get("paragraphs") or [])[:6]} for x in items]}
         if r["kind"] == "svg":
             return {"kind": "svg", "svg": workspace.path_of(r).read_text()}
+        if r["kind"] in ("doc", "slides", "md"):
+            return {"kind": r["kind"], "title": Path(r["name"]).stem.replace("-", " ").title(),
+                    "markdown": workspace.path_of(r).read_text()[:200_000]}
         return {"kind": r["kind"], "note": "Download to open this file."}
 
     @app.put("/api/upload")
@@ -368,13 +485,28 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         rec = workspace.register(db, user["id"], "uploads", p, ext.lstrip("."), user["plan"])
         return {"id": rec["id"], "name": clean, "size": rec["size"]}
 
+    @app.delete("/api/files/{fid}")
+    def delete_file(request: Request, fid: str):
+        """Delete one file for good: the bytes, and the row that says this user owns it."""
+        user = who(request)
+        r = own_file(user, fid)
+        try:
+            workspace.path_of(r).unlink(missing_ok=True)
+        except workspace.PathEscape:
+            pass
+        db.run("DELETE FROM workspace_files WHERE id=? AND user_id=?", (fid, user["id"]))
+        db.run("DELETE FROM artifacts WHERE user_id=? AND kind IN ('doc','slides') AND data LIKE ?",
+               (user["id"], f'%"file_id": "{fid}"%'))
+        activity.log(db, user["id"], "file_deleted", file=r["name"], file_kind=r["kind"])
+        return {"ok": True, "used_bytes": workspace.usage_bytes(db, user["id"])}
+
     @app.delete("/api/workspace")
     def delete_workspace(request: Request):
         user = who(request)
         workspace.delete_all(db, user["id"])
         return {"ok": True}
 
-    # ---- wallet and profile ----------------------------------------------------------------------------------------------------------
+    # ---- wallet, profile, and recursive harness (section 18) -------------------------------------------------------------
     @app.get("/api/wallet")
     def wallet_ep(request: Request):
         user = who(request)
@@ -385,8 +517,34 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
     @app.get("/api/runs/{task_id}/usage")
     def usage(request: Request, task_id: str):
         user = who(request)
-        return db.all("SELECT step_no,role,model,input_tokens,cached_tokens,output_tokens,reasoning_tokens,cost_usd,credits_charged,finish_reason "
+        return db.all("SELECT step_no,role,model,input_tokens,cached_tokens,output_tokens,reasoning_tokens,cost_usd,credits_charged,finish_reason,latency_ms "
                       "FROM usage_events WHERE user_id=? AND task_id=? ORDER BY step_no", (user["id"], task_id))
+
+    @app.get("/api/lessons")
+    def get_lessons(request: Request):
+        user = who(request)
+        recursive.seed(db)
+        rows = db.all("SELECT id,scope,topic,text,evidence,helped_count,hurt_count,review_status,created_at FROM lessons "
+                      "WHERE (scope='shared' AND review_status='approved') OR (scope='personal' AND user_id=?) ORDER BY id DESC LIMIT 50",
+                      (user["id"],))
+        return {"lessons": rows}
+
+    @app.get("/api/harness/improvements")
+    def get_improvements(request: Request):
+        user = who(request)
+        rows = db.all("SELECT * FROM improvement_records WHERE user_id=? ORDER BY created_at DESC LIMIT 30", (user["id"],))
+        for r in rows:
+            r["edits"] = jload(r["edits"], {})
+            r["evidence"] = jload(r["evidence"], {})
+        return {"records": rows}
+
+    @app.post("/api/harness/undo")
+    def undo_harness(request: Request, record_id: str = Body(..., embed=True)):
+        user = who(request)
+        try:
+            return recursive.undo_improvement(db, user["id"], record_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
 
     @app.get("/api/profile")
     def get_profile(request: Request):
@@ -416,23 +574,37 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
             db.run("UPDATE users SET private_route=? WHERE id=?", (1 if data["private_route"] else 0, user["id"]))
         if "name" in data:
             db.run("UPDATE users SET name=? WHERE id=?", (str(data["name"])[:40] or "Student", user["id"]))
-        return {"ok": True}
+        if "image_model" in data:
+            wanted = data["image_model"] or None
+            if wanted and not any(m["id"] == wanted for m in catalog.image_models(db)):
+                raise HTTPException(400, "That model cannot generate images.")
+            db.run("UPDATE users SET image_model=? WHERE id=?", (wanted, user["id"]))
+        if "ui_prefs" in data:
+            raw = data["ui_prefs"]
+            if raw is not None and (not isinstance(raw, dict) or len(jdump(raw)) > 4000):
+                raise HTTPException(400, "Those display settings are not valid.")
+            db.run("UPDATE users SET ui_prefs=? WHERE id=?", (jdump(uiprefs.clean(raw)) if raw else None, user["id"]))
+        return {"ok": True, "ui_prefs": uiprefs.clean(raw) if "ui_prefs" in data and raw else {}}
 
     # ---- dev + admin ---------------------------------------------------------------------------------------------------------------------------
-    def need_admin(request: Request) -> None:
-        if settings.dev_mode:
-            return
-        if not settings.admin_token or request.headers.get("x-admin-token") != settings.admin_token:
-            raise HTTPException(403, "admin only")
+    def need_admin(request: Request) -> dict:
+        """Admins sign in with email and password (role=admin), or send the ADMIN_TOKEN header (scripts)."""
+        user = accounts.session_user(db, request.cookies.get("sid"))
+        if user and user.get("role") == "admin" and user.get("status") != "blocked":
+            return user
+        if settings.admin_token and hmac.compare_digest(request.headers.get("x-admin-token", ""), settings.admin_token):
+            return {"id": "admin-token", "role": "admin"}
+        raise HTTPException(403, "Admin login required.")
 
     @app.post("/api/dev/plan")
     def dev_plan(request: Request, plan: str = Body(..., embed=True)):
         if not settings.dev_mode:
             raise HTTPException(403, "dev mode only")
         user = who(request)
-        if plan not in wallet.PLANS:
+        if not plans.get(plan) or plans.get(plan)["kind"] != "subscription":
             raise HTTPException(400, "unknown plan")
         db.run("UPDATE users SET plan=? WHERE id=?", (plan, user["id"]))
+        activity.log(db, user["id"], "plan_changed", plan=plan, via="dev-switch")
         return {"plan": plan}
 
     @app.post("/api/dev/topup")
@@ -470,6 +642,10 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
     def health(request: Request):
         need_admin(request)
         return {"ledger_mismatches": wallet.ledger_mismatches(db), "last_sync": app.state.last_sync}
+
+    from . import routes_account, routes_admin
+    routes_account.install(app, db, harness, who)
+    routes_admin.install(app, db, harness, need_admin)
 
     if FRONTEND.exists():
         app.mount("/", StaticFiles(directory=str(FRONTEND), html=True), name="ui")

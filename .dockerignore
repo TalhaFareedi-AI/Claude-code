@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+data/
+workspaces/
+**/__pycache__
+.pytest_cache
+node_modules
+shots
+docs
+plan.md
+backend/tests
+scripts/*.cjs

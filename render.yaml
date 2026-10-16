@@ -1,0 +1,28 @@
+# Render Blueprint: New > Blueprint > pick this repo. A persistent disk keeps the SQLite database.
+services:
+  - type: web
+    name: study-harness
+    runtime: docker
+    plan: starter              # a disk needs a paid instance; starter is the smallest
+    healthCheckPath: /healthz
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false            # you type it in the Render dashboard, it is never stored in git
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: APP_SECRET
+        generateValue: true
+      - key: UNLOCK_ALL
+        value: admin           # only your admin login gets every feature; visitors follow the plans
+      - key: PAYMENT_PROVIDER
+        value: manual
+      - key: BRAIN_POLICY
+        value: cheap
+      - key: DEV_MODE
+        value: "0"

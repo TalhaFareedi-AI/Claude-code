@@ -1,0 +1,14 @@
+# Run anywhere with Docker:  cp .env.example .env  (fill it in)  then  docker compose up -d --build
+services:
+  app:
+    build: .
+    ports: ["8000:8000"]
+    env_file: .env
+    environment:
+      DB_PATH: /data/app.db
+      WORKSPACE_ROOT: /data/workspaces
+    volumes:
+      - study-data:/data
+    restart: unless-stopped
+volumes:
+  study-data:

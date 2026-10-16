@@ -10,6 +10,7 @@ from decimal import Decimal
 from .pricing import EFFORT_SHARE, call_cost, credits_for_cost
 
 WEB_SEARCH_USD = Decimal("0.007")
+IMAGE_OUT_TOKENS = 1200  # what one generated picture costs in output tokens (tools/image.py sends this cap)
 
 
 def _price(m: dict) -> tuple[float, float, float]:
@@ -29,7 +30,8 @@ def _think_out(base_think: int, answer: int, effort: str, default_effort: str, c
 
 
 def estimate(mode: dict, brains: dict[str, list[dict]], *, rounds: int | None = None, tries: int | None = None,
-             effort: str = "auto", chart: bool = False, searches: int | None = None) -> dict:
+             effort: str = "auto", chart: bool = False, searches: int | None = None,
+             image_model: dict | None = None) -> dict:
     """brains: role -> list of model rows. Returns {usd, credits, parts}."""
     r = mode["runner"]
     p = mode.get("params", {})
@@ -86,6 +88,12 @@ def estimate(mode: dict, brains: dict[str, list[dict]], *, rounds: int | None = 
         for k in range(10):
             parts.append((f"item {k+1}", _cost(w, 3000, 700)))
         parts.append(("check", _cost(one("checker"), 3000, 300)))
+    if image_model is not None:
+        # One generated picture. Image models bill the picture as output tokens, so this is the costly part.
+        parts.append(("picture", _cost(image_model, 300, IMAGE_OUT_TOKENS)))
     total = sum((c for _, c in parts), Decimal(0))
+    media = sum((c for n, c in parts if n == "picture"), Decimal(0))
     return {"usd": float(total), "credits": max(1, credits_for_cost(total)),
+            # A drawn picture is paid media, not thinking, so the caller may allow it above the mode's cap.
+            "media_credits": credits_for_cost(media) if media else 0,
             "parts": [{"name": n, "usd": float(c)} for n, c in parts]}

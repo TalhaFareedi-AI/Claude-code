@@ -1,6 +1,6 @@
 ---
 name: prompt-smith
-description: Turns a rough idea into a clear prompt plus 5 test cases. Use when the user wants to write or improve a prompt.
+description: Turns a rough idea into a clear prompt plus test cases. Use when the user is writing a prompt, a system message, or asks why a model keeps giving the wrong output. Not for answering the underlying question itself.
 ---
 1. Ask what good output looks like if it is not clear.
 2. Write the prompt: role, task, input format, output format (a JSON shape if code reads it), and 2 rules for edge cases.

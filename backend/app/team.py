@@ -1,0 +1,728 @@
+"""Bounded, configurable helpers for the agent team (plan section 16 & section 18).
+
+The scheduler is Python. Agent outputs are data, every call passes through the
+run meter, and one failed optional helper does not discard completed work.
+Supports:
+  - 9-agent workflow: Understander, Prompt enhancer, Planners (up to 5), Plan Judge,
+    Architecture agent (with interactive D3 diagram), Researchers (1 to 5), Builder,
+    Checker, Finisher.
+  - 5 Critic sub-agents (Devil's advocate, Assumption checker, Fact verifier,
+    Math & logic verifier, Edge-case hunter) via spawn_subagent / run_critics.
+  - Section 18 Self-improvement (Off, Learned, Recursive k=1..5).
+"""
+import asyncio
+import copy
+import re
+import time
+
+from . import catalog, postprocess, prompts, workspace
+from .db import jdump
+from .harness import LimitReached, RunStopped, UserError, parse_json
+from .pricing import clamp_effort, credits_for_cost
+
+EFFORTS = {"auto", "off", "low", "medium", "high", "max"}
+ARCHITECTS = ("ui", "data", "document", "code")
+ENGINES = {"auto", "native", "exa", "parallel", "perplexity"}
+CRITIC_ROLES = {
+    "devil": "What is the strongest argument that this answer or plan is wrong?",
+    "assumptions": "What does this quietly assume, and is each assumption true here?",
+    "facts": "Does every claim match a source? Which claims have none?",
+    "math": "Recompute every number and check each step of the reasoning.",
+    "edge_cases": "Which input, user or situation breaks this? For code, plans, formulas and architectures.",
+}
+SELF_IMPROVE_MODES = {"off", "learned", "recursive"}
+
+_AGENT = {"enabled": True, "model": None, "effort": "off", "max_credits": None, "timeout_s": 60}
+_BALANCED = {
+    "name": "Balanced", "preset": "balanced", "plan_mode": "auto", "plan_depth": "normal",
+    "understand": dict(_AGENT), "enhancer": dict(_AGENT), "plan_judge": dict(_AGENT),
+    "planners": {**_AGENT, "count": 1, "models": [], "effort": "low"},
+    "architects": [], "architect_settings": {},
+    "architecture_agent": "off",
+    "researchers": {**_AGENT, "count": 1, "models": [], "effort": "low", "engine": "auto", "max_searches_each": 2},
+    "builder": {**_AGENT, "effort": "auto"}, "checker": dict(_AGENT),
+    "finisher": {**_AGENT, "effort": "auto"},
+    "critics": {"mode": "off", "roles": list(CRITIC_ROLES.keys()), "max_per_step": 5},
+    "self_improve": {"mode": "off", "k": 1},
+    "max_credits": None,
+}
+PRESETS = {
+    "fast": {**copy.deepcopy(_BALANCED), "name": "Fast", "preset": "fast", "plan_mode": "off",
+             "understand": {**_AGENT, "enabled": False},
+             "enhancer": {**_AGENT, "enabled": False},
+             "planners": {**_BALANCED["planners"], "count": 0},
+             "researchers": {**_BALANCED["researchers"], "count": 0}},
+    "balanced": copy.deepcopy(_BALANCED),
+    "full": {**copy.deepcopy(_BALANCED), "name": "Full team", "preset": "full", "plan_depth": "deep",
+             "planners": {**_BALANCED["planners"], "count": 3},
+             "researchers": {**_BALANCED["researchers"], "count": 3}, "architects": list(ARCHITECTS)},
+}
+
+
+def _integer(value, name, lo, hi):
+    if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+        raise UserError(f"{name} must be an integer from {lo} to {hi}.")
+    return value
+
+
+def _agent(raw, default, name):
+    if not isinstance(raw, dict):
+        raise UserError(f"{name} settings must be an object.")
+    out = {**default, **raw}
+    if not isinstance(out.get("enabled", True), bool):
+        raise UserError(f"{name}.enabled must be true or false.")
+    if out.get("model") is not None and (not isinstance(out["model"], str) or not out["model"].strip()):
+        raise UserError(f"{name}.model must be a model id.")
+    if not isinstance(out.get("effort", "off"), str) or out.get("effort", "off") not in EFFORTS:
+        raise UserError(f"Unknown effort for {name}.")
+    if out.get("max_credits") is not None:
+        _integer(out["max_credits"], name + ".max_credits", 1, 100000)
+    _integer(out.get("timeout_s", 60), name + ".timeout_s", 1, 180)
+    return out
+
+
+def normalize_team(raw: dict | None) -> dict:
+    """Validate a profile without resolving model ids or silently changing limits."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise UserError("Team settings must be an object.")
+    preset = raw.get("preset", "balanced")
+    if not isinstance(preset, str) or preset not in PRESETS:
+        raise UserError("Team preset must be fast, balanced, or full.")
+    out = copy.deepcopy(PRESETS[preset])
+    out.update({k: v for k, v in raw.items() if k in ("name", "plan_mode", "plan_depth", "max_credits", "architecture_agent")})
+    if not isinstance(out["name"], str) or not 1 <= len(out["name"].strip()) <= 80:
+        raise UserError("Team name must contain 1 to 80 characters.")
+    if not isinstance(out["plan_mode"], str) or out["plan_mode"] not in ("off", "auto", "ask"):
+        raise UserError("Plan mode must be off, auto, or ask.")
+    if not isinstance(out["plan_depth"], str) or out["plan_depth"] not in ("light", "normal", "deep"):
+        raise UserError("Planning depth must be light, normal, or deep.")
+    if out["architecture_agent"] not in ("off", "auto", "on"):
+        raise UserError("architecture_agent must be off, auto, or on.")
+    if out["max_credits"] is not None:
+        _integer(out["max_credits"], "team.max_credits", 1, 100000)
+    for name in ("understand", "enhancer", "plan_judge", "builder", "checker", "finisher", "planners", "researchers"):
+        out[name] = _agent(raw.get(name, {}), out[name], name)
+    allow_five = bool(raw.get("allow_five_planners") or (isinstance(raw.get("planners"), dict) and raw["planners"].get("allow_five")))
+    planner_limit = 5 if allow_five else 3
+    for name, limit in (("planners", planner_limit), ("researchers", 5)):
+        cfg = out[name]
+        _integer(cfg["count"], name + ".count", 0, limit)
+        if not cfg["enabled"]:
+            cfg["count"] = 0
+        if not isinstance(cfg["models"], list) or len(cfg["models"]) > limit or any(
+                m is not None and not isinstance(m, str) for m in cfg["models"]):
+            raise UserError(f"{name}.models must contain at most {limit} model ids.")
+        entries = cfg.get("agents", [])
+        if not isinstance(entries, list) or len(entries) > limit:
+            raise UserError(f"{name}.agents must contain at most {limit} agent configurations.")
+        cfg["agents"] = []
+        for i, entry in enumerate(entries):
+            defaults = {k: cfg[k] for k in _AGENT}
+            defaults["model"] = (cfg["models"][i] if i < len(cfg["models"]) else None) or cfg.get("model")
+            if name == "researchers":
+                defaults.update({"engine": cfg["engine"], "max_searches_each": cfg["max_searches_each"]})
+            instance = _agent({} if entry is None else entry, defaults, f"{name}.agents[{i}]")
+            if name == "researchers":
+                if not isinstance(instance["engine"], str) or instance["engine"] not in ENGINES:
+                    raise UserError("Unknown research search engine.")
+                _integer(instance["max_searches_each"], "researchers.max_searches_each", 1, 10)
+            cfg["agents"].append(instance)
+    researchers = out["researchers"]
+    if not isinstance(researchers["engine"], str) or researchers["engine"] not in ENGINES:
+        raise UserError("Unknown research search engine.")
+    _integer(researchers["max_searches_each"], "researchers.max_searches_each", 1, 10)
+    architects = raw.get("architects", out["architects"])
+    if not isinstance(architects, list) or len(architects) > 4 or any(not isinstance(a, str) or a not in ARCHITECTS for a in architects):
+        raise UserError("Choose up to four architects: ui, data, document, code.")
+    if len(set(architects)) != len(architects):
+        raise UserError("Choose each architect only once.")
+    out["architects"] = list(architects)
+    configs = raw.get("architect_settings", {})
+    if not isinstance(configs, dict) or any(k not in ARCHITECTS for k in configs):
+        raise UserError("Architect settings must use ui, data, document, or code.")
+    out["architect_settings"] = {kind: _agent(configs.get(kind, {}), {**_AGENT, "effort": "low"}, kind)
+                                 for kind in ARCHITECTS}
+
+    # Critic sub-agents validation (section 16, page 73-75)
+    raw_critics = raw.get("critics", out["critics"])
+    if isinstance(raw_critics, str):
+        raw_critics = {"mode": raw_critics}
+    if not isinstance(raw_critics, dict):
+        raise UserError("critics settings must be an object.")
+    cmode = raw_critics.get("mode", "off")
+    if cmode not in ("off", "auto", "always"):
+        raise UserError("critics.mode must be off, auto, or always.")
+    croles = raw_critics.get("roles", list(CRITIC_ROLES.keys()))
+    if not isinstance(croles, list) or any(r not in CRITIC_ROLES for r in croles):
+        raise UserError("Unknown critic role.")
+    cmax = _integer(raw_critics.get("max_per_step", 5), "critics.max_per_step", 1, 5)
+    out["critics"] = {"mode": cmode, "roles": list(dict.fromkeys(croles)), "max_per_step": cmax}
+
+    # Self-improve validation (section 18, page 84)
+    raw_si = raw.get("self_improve", out["self_improve"])
+    if isinstance(raw_si, str):
+        raw_si = {"mode": raw_si, "k": 1}
+    if not isinstance(raw_si, dict):
+        raise UserError("self_improve settings must be an object.")
+    simode = raw_si.get("mode", "off")
+    if simode not in SELF_IMPROVE_MODES:
+        raise UserError("self_improve.mode must be off, learned, or recursive.")
+    sik = _integer(raw_si.get("k", 1), "self_improve.k", 1, 5)
+    out["self_improve"] = {"mode": simode, "k": sik}
+    return out
+
+
+def effective_team(ctx) -> dict:
+    cfg = copy.deepcopy(getattr(ctx, "team", None) or normalize_team(getattr(ctx.req, "team", {})))
+    raw = getattr(ctx.req, "team", {}) or {}
+    if "architects" not in raw and cfg["preset"] != "fast" and not cfg["architects"]:
+        if ctx.intent in ("make_doc", "make_ppt"):
+            cfg["architects"] = ["document"]
+        elif ctx.mode["id"] == "developer":
+            cfg["architects"] = ["code"]
+    return cfg
+
+
+def _model(ctx, model_id, fallback):
+    m = ctx._pick(model_id, fallback) if model_id else (ctx.brain(fallback) if fallback in ctx.mode["slots"] else ctx.quick())
+    if m["tier"] not in ctx.rules["tiers"]:
+        raise UserError(f"{m['name']} needs a higher plan.")
+    if ctx.private and not m.get("private_route"):
+        raise UserError(f"Private route is on, and {m['name']} cannot use it.")
+    return m
+
+
+def team_instances(ctx, group: str, fallback_role: str) -> list[tuple[dict, dict]]:
+    cfg = effective_team(ctx)[group]
+    count = cfg.get("count", 1 if cfg.get("enabled", True) else 0)
+    ids = cfg.get("models", [])
+    if not ids and cfg.get("model"):
+        ids = [cfg["model"]]
+    out = []
+    for i in range(count):
+        agent_cfg = {k: v for k, v in cfg.items() if k not in ("agents", "count", "models")}
+        agent_cfg["model"] = (ids[i] if i < len(ids) else None) or agent_cfg.get("model")
+        if i < len(cfg.get("agents", [])):
+            agent_cfg.update(cfg["agents"][i])
+        if not agent_cfg.get("enabled", True):
+            continue
+        if agent_cfg.get("model"):
+            m = _model(ctx, agent_cfg["model"], fallback_role)
+        elif i == 0:
+            m = _model(ctx, None, fallback_role)
+        else:
+            base = out[0][0] if out else _model(ctx, None, fallback_role)
+            try:
+                m = catalog.resolve(ctx.db, base["tier"], need_thinks=cfg.get("effort") not in ("off", "auto"),
+                                    exclude=tuple(x[0]["id"] for x in out), tiers_allowed=ctx.rules["tiers"])
+                if ctx.private and not m.get("private_route"):
+                    m = base
+            except LookupError:
+                m = base
+        out.append((m, agent_cfg))
+    return out
+
+
+def team_models(ctx, group: str, fallback_role: str) -> list[dict]:
+    return [model for model, _ in team_instances(ctx, group, fallback_role)]
+
+
+async def agent_call(ctx, agent: str, model: dict, messages: list, *, config: dict | None = None,
+                     max_tokens: int = 1200, effort: str | None = None, **kwargs):
+    cfg = config or {}
+    effort = effort or cfg.get("effort", "off")
+    if effort == "auto":
+        fallback_role = "writer" if "writer" in ctx.mode["slots"] else "answer"
+        if agent == "finisher":
+            effort = ctx.effort(fallback_role)
+        else:
+            effort = ctx.effort("worker" if "worker" in ctx.mode["slots"] else fallback_role)
+    effort = clamp_effort(effort, ctx.plan)
+    start = time.monotonic()
+    before = credits_for_cost(getattr(ctx, "agent_usd", {}).get(agent, 0))
+    def spent():
+        return max(0, credits_for_cost(getattr(ctx, "agent_usd", {}).get(agent, 0)) - before)
+    ctx.emit("agent_start", agent=agent, model=model["name"], effort=effort, status="running")
+    try:
+        try:
+            res = await ctx.call(agent, model, messages, max_tokens=max_tokens, effort=effort,
+                                 agent_id=agent, agent_max_credits=cfg.get("max_credits"),
+                                 agent_timeout_s=cfg.get("timeout_s", 60), **kwargs)
+        except asyncio.TimeoutError:
+            alternatives = [catalog.get(ctx.db, mid) for mid in catalog.fallbacks(ctx.db, model["id"], 2, private_only=ctx.private)]
+            alternatives = [m for m in alternatives if m and m["tier"] in ctx.rules["tiers"] and m["id"] != model["id"]]
+            if not alternatives:
+                raise
+            model = alternatives[0]
+            ctx.emit("agent_fallback", agent=agent, model=model["name"], reason="timeout")
+            res = await ctx.call(agent, model, messages, max_tokens=max_tokens, effort=effort,
+                                 agent_id=agent, agent_max_credits=cfg.get("max_credits"),
+                                 agent_timeout_s=cfg.get("timeout_s", 60), **kwargs)
+    except BaseException as exc:
+        ctx.emit("agent_done", agent=agent, model=model["name"], effort=effort,
+                 status="stopped" if isinstance(exc, (RunStopped, LimitReached, asyncio.CancelledError)) else "failed",
+                 ms=int((time.monotonic() - start) * 1000), credits=spent(),
+                 detail=str(exc)[:200])
+        raise
+    ctx.emit("agent_done", agent=agent, model=model["name"], effort=effort, status="done",
+             ms=int((time.monotonic() - start) * 1000), credits=spent())
+    return res
+
+
+async def agent_json(ctx, agent, model, messages, *, config=None, max_tokens=1200):
+    res = await agent_call(ctx, agent, model, messages, config=config, max_tokens=max_tokens, json_mode=True)
+    for attempt in range(2):
+        try:
+            got = parse_json(res.text)
+            if isinstance(got, dict):
+                return got
+        except (ValueError, TypeError):
+            pass
+        if attempt == 0:
+            res = await agent_call(ctx, agent, model, messages + [
+                {"role": "assistant", "content": res.text[:1800]},
+                {"role": "user", "content": "Return a JSON object matching the requested schema. No prose or arrays."}],
+                config=config, max_tokens=max_tokens, json_mode=True, effort="off")
+    raise UserError(f"The {agent} returned an unreadable result.")
+
+
+def notice(ctx, text):
+    ctx.notices.append(text)
+    ctx.emit("notice", text=text)
+
+
+def _failures(ctx, results, label):
+    for result in results:
+        if isinstance(result, (RunStopped, LimitReached, asyncio.CancelledError)):
+            raise result
+    n = sum(isinstance(r, Exception) for r in results)
+    if n:
+        notice(ctx, f"{n} {label} failed; the team kept the completed work.")
+
+
+def goal(ctx):
+    card = getattr(ctx, "task_card", {})
+    return str(card.get("enhanced_prompt") or card.get("goal") or ctx.req.message)[:6000]
+
+
+async def understand(ctx):
+    """Agent 1: Understander + Prompt Enhancer (section 16, pages 68-70).
+
+    When the understanding and enhancer slots use the same model (default), sends one call
+    for both jobs. When they use different models, sends a second call to the enhancer model.
+    """
+    tcfg = effective_team(ctx)
+    cfg = tcfg["understand"]
+    enh_cfg = tcfg.get("enhancer", {"enabled": True, "model": None})
+    if not cfg["enabled"]:
+        return {}
+    u_model = _model(ctx, cfg.get("model"), "understand")
+    try:
+        card = await agent_json(ctx, "understand", u_model, [
+            {"role": "system", "content": prompts.get("team_understand")},
+            {"role": "user", "content": ctx.user_content()[:7000] + "\n\nReader context:\n" + ctx.context_block()[:1500]}],
+            config=cfg, max_tokens=650)
+    except (RunStopped, LimitReached):
+        raise
+    except Exception:
+        notice(ctx, "Understanding was unavailable; the team is using your original request.")
+        return {}
+    keys = ("goal", "enhanced_prompt", "teach_level", "needs_architecture", "constraints", "missing", "research", "files", "queries")
+    ctx.task_card = {k: card[k] for k in keys if k in card}
+
+    # Separate Prompt Enhancer call only when enhancer is enabled and uses a distinct model
+    if enh_cfg.get("enabled", True) and enh_cfg.get("model"):
+        e_model = _model(ctx, enh_cfg["model"], "understand")
+        if e_model["id"] != u_model["id"]:
+            try:
+                enh = await agent_json(ctx, "enhancer", e_model, [
+                    {"role": "system", "content": prompts.get("team_enhancer")},
+                    {"role": "user", "content": f"Original request:\n{ctx.req.message[:4000]}\n\nTask card:\n{jdump(ctx.task_card)}"}],
+                    config=enh_cfg, max_tokens=500)
+                if isinstance(enh.get("enhanced_prompt"), str) and enh["enhanced_prompt"].strip():
+                    ctx.task_card["enhanced_prompt"] = enh["enhanced_prompt"].strip()[:6000]
+                if isinstance(enh.get("next_buttons"), list):
+                    ctx.task_card["next_buttons"] = [str(b)[:40] for b in enh["next_buttons"][:3]]
+            except (RunStopped, LimitReached):
+                raise
+            except Exception:
+                pass
+
+    ctx.emit("task_card", card=ctx.task_card)
+    if isinstance(ctx.task_card.get("enhanced_prompt"), str) and ctx.task_card["enhanced_prompt"].strip():
+        ctx.emit("prompt_enhanced", text=ctx.task_card["enhanced_prompt"][:6000])
+    return ctx.task_card
+
+
+def normalize_plan(raw, max_steps, tools=()) -> list[dict]:
+    if not isinstance(raw, list) or not raw:
+        raise UserError("A plan must contain at least one step.")
+    if not 1 <= len(raw) <= max_steps:
+        raise UserError(f"A plan can contain at most {max_steps} steps.")
+    out = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict) or not str(item.get("title", "")).strip():
+            raise UserError("Each plan step needs a title.")
+        kind = item.get("kind", "think")
+        if kind not in ("think", "calculate", "chart", "diagram", "d3_diagram", "science_plot", "answer", "research", "code"):
+            kind = "think"
+        if kind in ("chart", "diagram") and kind not in tools:
+            kind = "think"
+        if kind == "research" and "web" not in tools and "web_search" not in tools:
+            kind = "think"
+        if kind == "answer" and i < len(raw) - 1:
+            kind = "think"
+        title = str(item["title"]).strip()[:120]
+        detail = str(item.get("detail") or item.get("goal") or title)[:600]
+        out.append({"title": title, "kind": kind, "detail": detail,
+                    "goal": str(item.get("goal") or detail)[:500],
+                    "check": str(item.get("check") or "Verify the result meets the step goal and the user's constraints.")[:500]})
+    if out[-1]["kind"] != "answer":
+        final = {"title": "Write the answer", "kind": "answer", "detail": "Join the verified work into the final reply.",
+                 "goal": "Address the user's request with the completed work.", "check": "Every requested part is addressed; cite evidence and state unresolved gaps."}
+        out = out[:max_steps - 1] + [final]
+    return out
+
+
+async def make_plan(ctx, skill_text: str, max_steps: int, *, replan: str = "", completed: str = "") -> list[dict]:
+    cfg = effective_team(ctx)
+    if cfg["plan_mode"] == "off" or cfg["planners"]["count"] == 0:
+        return normalize_plan([{"title": "Write the answer", "kind": "answer", "goal": ctx.req.message}], max_steps, ctx.req.tools)
+    system = prompts.render("team_planner", max_steps=max_steps, tools=", ".join(ctx.req.tools))
+    if skill_text:
+        system += "\nSelected recipe:\n" + skill_text[:5000]
+    body = goal(ctx)
+    if replan:
+        body += "\n\nUpdate only the remaining plan for this reason: " + replan[:1000] + "\nCompleted work (do not repeat):\n" + completed[:5000]
+    instances = team_instances(ctx, "planners", "planner")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": body}]
+    async def one_plan(i, model, agent_cfg):
+        name = f"planner{i+1}"
+        proposed = await agent_json(ctx, name, model, messages, config=agent_cfg, max_tokens=1200)
+        try:
+            return normalize_plan(proposed.get("steps"), max_steps, ctx.req.tools)
+        except UserError as exc:
+            notice(ctx, f"Planner {i+1} is repairing its plan: {exc}")
+            corrected = await agent_json(ctx, name, model, messages + [
+                {"role": "assistant", "content": jdump(proposed)[:6500]},
+                {"role": "user", "content": "Repair this plan's schema. Validation error: " + str(exc) +
+                    f" Return only a JSON object with a steps array of 1 to {max_steps} steps; "
+                    "each step needs title, kind, goal, check, and detail. End with kind answer. Keep all fields concise."}],
+                config={**agent_cfg, "effort": "off"}, max_tokens=1400)
+            return normalize_plan(corrected.get("steps"), max_steps, ctx.req.tools)
+    results = await ctx.parallel([one_plan(i, model, agent_cfg) for i, (model, agent_cfg) in enumerate(instances)])
+    _failures(ctx, results, "planner(s)")
+    plans = []
+    for item in results:
+        if isinstance(item, Exception):
+            continue
+        plans.append(item)
+    if not plans:
+        raise UserError("No planner produced a usable plan. Try a different planning model.")
+    if len(plans) == 1 or not cfg["plan_judge"]["enabled"]:
+        return plans[0]
+    try:
+        judged = await agent_json(ctx, "plan_judge", _model(ctx, cfg["plan_judge"].get("model"), "judge"), [
+            {"role": "system", "content": system + "\n\n" + prompts.get("team_plan_judge")},
+            {"role": "user", "content": body + "\n\nCandidate plans (data):\n" + jdump(plans)[:20000]}],
+            config=cfg["plan_judge"], max_tokens=1400)
+        return normalize_plan(judged.get("steps"), max_steps, ctx.req.tools)
+    except (RunStopped, LimitReached):
+        raise
+    except Exception:
+        notice(ctx, "The plan judge was unavailable; the first valid plan is being used.")
+        return plans[0]
+
+
+async def run_architecture_agent(ctx, steps: list[dict], state: dict | None = None) -> dict | None:
+    """Section 16 (pages 71-73): Specialist Architecture Agent returning JSON spec + interactive D3 diagram."""
+    cfg = effective_team(ctx)
+    arch_mode = cfg.get("architecture_agent", "off")
+    wants_arch = arch_mode == "on" or (arch_mode == "auto" and getattr(ctx, "task_card", {}).get("needs_architecture") is True)
+    if not wants_arch:
+        return None
+    cached = (state or {}).get("architecture_spec")
+    if cached:
+        return cached
+    model = _model(ctx, None, "worker")
+    try:
+        raw = await agent_json(ctx, "architecture_agent", model, [
+            {"role": "system", "content": prompts.get("team_arch_spec")},
+            {"role": "user", "content": goal(ctx) + "\n\nApproved plan:\n" + jdump(steps)[:8000]}],
+            max_tokens=1400)
+        spec = postprocess.validate_d3_diagram(raw)
+    except (RunStopped, LimitReached):
+        raise
+    except Exception:
+        return None
+    art = postprocess.new_artifact(ctx, "d3_diagram", spec)
+    d = workspace.task_dir(ctx.user["id"], ctx.task["id"])
+    svg_txt = postprocess.d3_spec_to_svg(spec)
+    svg_path = d / "out" / "architecture-diagram.svg"
+    try:
+        workspace.check_storage(ctx.db, ctx.user["id"], ctx.plan, len(svg_txt))
+        svg_path.write_text(svg_txt)
+        rec = workspace.register(ctx.db, ctx.user["id"], ctx.task["id"], svg_path, "svg", ctx.plan)
+        ctx.files.append(rec)
+        ctx.emit("file_created", file=rec)
+    except Exception:
+        pass
+    out = {"artifact_id": art["id"], "spec": spec}
+    if state is not None:
+        state["architecture_spec"] = out
+    return out
+
+
+async def blueprints(ctx, steps: list[dict], state: dict | None = None) -> list[dict]:
+    cfg = effective_team(ctx)
+    kinds = [k for k in cfg["architects"] if cfg["architect_settings"][k]["enabled"]]
+    async def one(kind):
+        cached = next((item for item in (state or {}).get("blueprints", []) if item["kind"] == kind), None)
+        if cached:
+            return cached
+        agent_cfg = cfg["architect_settings"][kind]
+        res = await agent_call(ctx, "architect_" + kind, _model(ctx, agent_cfg.get("model"), "worker"), [
+            {"role": "system", "content": prompts.render("team_architect", kind=kind)},
+            {"role": "user", "content": goal(ctx) + "\n\nApproved plan:\n" + jdump(steps)[:9000]}],
+            config=agent_cfg, max_tokens=1400)
+        if not res.text.strip():
+            raise UserError("The architect returned an empty blueprint.")
+        text = res.text[:6500]
+        d = workspace.task_dir(ctx.user["id"], ctx.task["id"])
+        (d / "work" / f"blueprint-{kind}.md").write_text(text)
+        path = d / "out" / f"blueprint-{kind}.md"
+        workspace.check_storage(ctx.db, ctx.user["id"], ctx.plan, len(text.encode()))
+        path.write_text(text)
+        rec = workspace.register(ctx.db, ctx.user["id"], ctx.task["id"], path, "md", ctx.plan)
+        ctx.files.append(rec)
+        ctx.emit("file_created", file=rec)
+        return {"kind": kind, "path": "work/" + path.name, "text": text, "file_id": rec["id"]}
+    results = await ctx.parallel([one(kind) for kind in kinds])
+    good = [r for r in results if not isinstance(r, BaseException)]
+    if state is not None:
+        state["blueprints"] = good
+    _failures(ctx, results, "architect(s)")
+    if cfg.get("architecture_agent", "off") != "off":
+        await run_architecture_agent(ctx, steps, state)
+    return good
+
+
+def research_enabled(ctx) -> bool:
+    cfg = effective_team(ctx)["researchers"]
+    return cfg["count"] > 0 and ("web" in ctx.req.tools or "web_search" in ctx.req.tools)
+
+
+async def research(ctx, steps: list[dict], state: dict | None = None) -> list[dict]:
+    cfg = effective_team(ctx)["researchers"]
+    if not research_enabled(ctx):
+        return []
+    instances = team_instances(ctx, "researchers", "search" if "search" in ctx.mode["slots"] else "worker")
+    subquestions = [s.get("goal") or s.get("detail") or s["title"] for s in steps if s["kind"] != "answer"]
+    if not subquestions:
+        subquestions = [goal(ctx)]
+    perspectives = ("definitions and primary evidence", "recent evidence and current facts", "limitations and counterexamples",
+                    "implementation and practical examples", "independent verification and disagreements")
+    async def one(i, model, agent_cfg):
+        query = str(subquestions[i % len(subquestions)])[:800] + "; focus on " + perspectives[i]
+        cached = next((item for item in (state or {}).get("research", []) if item["query"] == query), None)
+        if cached:
+            return cached
+        ctx.emit("tool_start", tool="web_search", agent=f"researcher{i+1}", title=query[:150],
+                 input={"query": query, "engine": agent_cfg["engine"], "max_searches": agent_cfg["max_searches_each"]})
+        try:
+            result = await agent_call(ctx, f"researcher{i+1}", model, [
+                {"role": "system", "content": prompts.get("team_research")},
+                {"role": "user", "content": "Overall goal:\n" + goal(ctx) + "\n\nYour distinct research assignment:\n" + query}],
+                config=agent_cfg, max_tokens=1500,
+                tools=[{"type": "openrouter:web_search", "parameters": {"engine": agent_cfg["engine"],
+                        "max_uses": agent_cfg["max_searches_each"], "max_total_results": 6,
+                        "max_results": 3, "max_characters": 4000}}],
+                max_tool_calls=agent_cfg["max_searches_each"], extra_usd=0.01 * agent_cfg["max_searches_each"])
+        except BaseException:
+            ctx.emit("tool_result", tool="web_search", agent=f"researcher{i+1}", ok=False, summary="Research could not finish.")
+            raise
+        sources = result.sources or []
+        ctx.emit("tool_result", tool="web_search", agent=f"researcher{i+1}", ok=bool(sources),
+                 summary=f"{len(sources)} sources found" if sources else "No verifiable citation metadata returned.", cost=ctx.meter.credits)
+        if sources:
+            ctx.emit("sources", agent=f"researcher{i+1}", sources=sources)
+        else:
+            notice(ctx, f"Researcher {i+1} returned no verifiable sources; its factual claims will not be used as evidence.")
+        text = result.text[:6500]
+        d = workspace.task_dir(ctx.user["id"], ctx.task["id"])
+        (d / "work" / f"research-{i+1}.json").write_text(jdump({"query": query, "notes": text, "sources": sources}))
+        return {"query": query, "notes": text if sources else "No linked evidence was returned.", "sources": sources}
+    results = await ctx.parallel([one(i, model, agent_cfg) for i, (model, agent_cfg) in enumerate(instances)])
+    good = [r for r in results if not isinstance(r, BaseException)]
+    if state is not None:
+        state["research"] = good
+    _failures(ctx, results, "researcher(s)")
+    return good
+
+
+def context(state: dict, limit=10000) -> str:
+    parts = []
+    if state.get("architecture_spec"):
+        spec = state["architecture_spec"]["spec"]
+        parts.append(f"Architecture Diagram Spec (marker [[artifact:{state['architecture_spec']['artifact_id']}]]):\n"
+                     f"Title: {spec['title']}\nExplanation: {spec.get('explanation','')}\nNodes: {jdump(spec['nodes'][:8])}")
+    for item in state.get("blueprints", []):
+        parts.append(f"Blueprint ({item['kind']}, {item['path']}):\n{item['text'][:3000]}")
+    for item in state.get("research", []):
+        sources = "\n".join(f"- {s.get('title') or s['url']}: {s['url']}" for s in item["sources"])
+        parts.append(f"Research assignment: {item['query']}\n{item['notes'][:2000]}\nSources:\n{sources}")
+    return "\n\n".join(parts)[:limit]
+
+
+async def prepare_team(ctx, state: dict):
+    """Architects and researchers have no dependency on each other."""
+    if state.get("prepared"):
+        return
+    results = await ctx.parallel([blueprints(ctx, state["steps"], state), research(ctx, state["steps"], state)])
+    for r in results:
+        if isinstance(r, BaseException):
+            raise r
+    state["blueprints"], state["research"] = results
+    state["prepared"] = True
+
+
+def save_state(ctx, state):
+    ctx.db.run("UPDATE tasks SET state=? WHERE id=?", (jdump(state), ctx.task["id"]))
+    workspace.write_todo(ctx.user["id"], ctx.task["id"], state["steps"], len(state.get("results", [])))
+
+
+def approval(ctx, state: dict):
+    """Approval pauses before any builder, architect, or paid research work."""
+    state["awaiting_plan_approval"] = True
+    save_state(ctx, state)
+    ctx.emit("ask", kind="approve_plan", task_id=ctx.task["id"], plan=state["steps"],
+             text="Review or edit the plan, then approve it to start work.")
+
+
+async def check_step(ctx, step: dict, result: str):
+    from .tools import calc as calculator
+    cfg = effective_team(ctx)["checker"]
+    if not cfg["enabled"]:
+        return {"ok": True}
+    artifacts = [a for a in ctx.artifacts if f"[[artifact:{a['id']}]]" in result]
+    evidence = ("\n\nReferenced artifact contents (validated by code):\n" + jdump(artifacts)[:9000]) if artifacts else ""
+    checked_result, _ = calculator.fill(result)
+    return await agent_json(ctx, "checker", _model(ctx, cfg.get("model"), "checker"), [
+        {"role": "system", "content": prompts.get("team_check")},
+        {"role": "user", "content": f"Task: {goal(ctx)}\nStep goal: {step['goal']}\nCheck: {step['check']}\nResult:\n{checked_result[:6000]}" + evidence}],
+        config=cfg, max_tokens=600)
+
+
+# ---- Critic sub-agents for deeper critical thinking (section 16, pages 73-76) ----
+def _critic_model(ctx, parent_model: dict | None = None) -> dict:
+    """Prefer a model from a different lab than the parent when available (Harness² blind-spot rule)."""
+    rows = catalog.listing(ctx.db, ctx.rules["tiers"])
+    if ctx.private:
+        rows = [m for m in rows if m.get("private_route")]
+    parent_lab = (parent_model or {}).get("lab")
+    diff_lab = [m for m in rows if m["lab"] != parent_lab and m["tier"] in ("quick", "smart")]
+    pool = diff_lab or [m for m in rows if m["tier"] in ("quick", "smart")] or rows
+    return min(pool, key=lambda m: 0.3 * (m["price_in"] or 0) + 0.7 * (m["price_out"] or 0))
+
+
+async def spawn_subagent(ctx, role: str, question: str, work_text: str, *, parent_model: dict | None = None,
+                         step_no: int | None = None) -> dict:
+    """Spawn one narrow critic sub-agent in a fresh small context (1 level only, max 300 tokens)."""
+    if role not in CRITIC_ROLES:
+        raise UserError(f"Unknown critic sub-agent role: {role}")
+    count = getattr(ctx, "critic_count", 0)
+    if count >= 15:
+        return {"role": role, "verdict": "pass", "confidence": "low", "finding": "Task critic cap (15) reached.", "evidence": "", "fix": ""}
+    ctx.critic_count = count + 1
+    model = _critic_model(ctx, parent_model)
+    sys_prompt = prompts.render("team_critic", role=role, question=question)
+    res = await agent_json(
+        ctx, f"critic_{role}", model,
+        [{"role": "system", "content": sys_prompt},
+         {"role": "user", "content": f"Task goal:\n{goal(ctx)[:1500]}\n\nWork to inspect:\n{work_text[:4500]}"}],
+        max_tokens=300,
+    )
+    report = {
+        "role": role,
+        "verdict": str(res.get("verdict") or "pass").lower() if res.get("verdict") in ("pass", "problem", "note") else "pass",
+        "confidence": str(res.get("confidence") or "medium").lower(),
+        "finding": str(res.get("finding") or "Checked.")[:240],
+        "evidence": str(res.get("evidence") or "")[:240],
+        "fix": str(res.get("fix") or "")[:240],
+        "model": model["name"],
+        "step": step_no,
+    }
+    ctx.emit("critic_report", **report)
+    return report
+
+
+async def run_critics(ctx, step: dict, result: str, *, parent_model: dict | None = None, step_no: int | None = None) -> list[dict]:
+    """Run up to 5 critic sub-agents in parallel on a step's work when Critical Thinking is enabled."""
+    cfg = effective_team(ctx).get("critics", {"mode": "off"})
+    mode = cfg.get("mode", "off")
+    if mode == "off":
+        return []
+    roles = list(cfg.get("roles") or CRITIC_ROLES.keys())[: cfg.get("max_per_step", 5)]
+    if mode == "auto":
+        # Auto turns critics on only when it matters: math, facts, code, architecture, or high stakes
+        text_low = (step.get("title", "") + " " + result).lower()
+        selected = []
+        if re.search(r"\d\s*[-+*/=]\s*\d|\b(percent|rate|sum|total|formula|math)\b", text_low) and "math" in roles:
+            selected.append("math")
+        if re.search(r"https?://|\b(source|study|report|according to)\b", text_low) and "facts" in roles:
+            selected.append("facts")
+        if re.search(r"```|\b(def |function |class |sql|architecture|cnn|transformer)\b", text_low) and "edge_cases" in roles:
+            selected.append("edge_cases")
+        if not selected and len(result) > 400 and "devil" in roles:
+            selected.append("devil")
+        roles = selected[: cfg.get("max_per_step", 5)]
+    if not roles:
+        return []
+    coros = [
+        spawn_subagent(ctx, r, CRITIC_ROLES[r], result, parent_model=parent_model, step_no=step_no)
+        for r in roles
+    ]
+    reports = await ctx.parallel(coros)
+    return [r for r in reports if isinstance(r, dict)]
+
+
+def agent_model(ctx, role, fallback):
+    cfg = effective_team(ctx)[role]
+    return _model(ctx, cfg.get("model"), fallback)
+
+
+def team_estimate(ctx) -> list[dict]:
+    """Conservative additive calls for shared helpers; root adds builder output."""
+    from .pricing import call_cost
+    cfg = effective_team(ctx)
+    out = []
+    def add(name, model, output, count=1, tool_usd=0):
+        out.append({"name": name, "usd": float(call_cost(model["price_in"], model["price_out"], 6000, output)) * count + tool_usd})
+    if cfg["understand"]["enabled"]:
+        add("understand", agent_model(ctx, "understand", "understand"), 650)
+    if cfg["plan_mode"] != "off":
+        for model, _ in team_instances(ctx, "planners", "planner"):
+            add("planner", model, 1200)
+        if cfg["planners"]["count"] > 1 and cfg["plan_judge"]["enabled"]:
+            add("plan_judge", agent_model(ctx, "plan_judge", "judge"), 1400)
+    for kind in cfg["architects"]:
+        agent_cfg = cfg["architect_settings"][kind]
+        if agent_cfg["enabled"]:
+            add("architect_" + kind, _model(ctx, agent_cfg.get("model"), "worker"), 1400)
+    if cfg.get("architecture_agent") == "on":
+        add("architecture_agent", _model(ctx, None, "worker"), 1400)
+    if research_enabled(ctx):
+        for model, agent_cfg in team_instances(ctx, "researchers", "search" if "search" in ctx.mode["slots"] else "worker"):
+            add("researcher", model, 1500, tool_usd=0.01 * agent_cfg["max_searches_each"])
+    if cfg.get("critics", {}).get("mode") == "always":
+        cmodel = _critic_model(ctx)
+        croles = cfg["critics"].get("roles", [])[: cfg["critics"].get("max_per_step", 5)]
+        if croles:
+            add("critics", cmodel, 300, count=len(croles))
+    if cfg.get("self_improve", {}).get("mode") == "recursive":
+        k = cfg["self_improve"].get("k", 1)
+        em = _model(ctx, None, "worker")
+        add("recursive_improver", em, 600, count=3 * k)
+    return out

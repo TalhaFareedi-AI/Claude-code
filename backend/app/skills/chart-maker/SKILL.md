@@ -1,6 +1,6 @@
 ---
 name: chart-maker
-description: Writes a chart recipe so the user can play with sliders. Use when a graph or an interactive explainer would teach the idea.
+description: Writes an interactive chart recipe with sliders the user can move. Use when a graph, plot or visual relationship would answer the question better than prose. Not for plain tables of data, which is the table tool.
 ---
 1. Pick the one formula that shows the idea.
 2. Choose 1 to 3 sliders with sensible ranges and a default in the middle.

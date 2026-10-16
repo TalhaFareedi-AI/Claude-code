@@ -42,7 +42,7 @@ export async function streamChat(body, onEvent, signal) {
   }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
-  let buf = '';
+  let buf = '', finished = false;
   for (;;) {
     let chunk;
     try { chunk = await reader.read(); } catch (e) { if (e.name === 'AbortError') return; throw new ApiError('The connection dropped. Your run keeps going on the server; reload to see it.', 0); }
@@ -53,8 +53,9 @@ export async function streamChat(body, onEvent, signal) {
       const block = buf.slice(0, idx); buf = buf.slice(idx + 2);
       for (const line of block.split('\n')) {
         if (!line.startsWith('data:')) continue;
-        try { onEvent(JSON.parse(line.slice(5))); } catch (e) { console.error('bad event', e); }
+        try { const ev = JSON.parse(line.slice(5)); if (ev.type === 'run_done') finished = true; onEvent(ev); } catch (e) { console.error('bad event', e); }
       }
     }
   }
+  if (!finished) throw new ApiError('The connection closed while your task was running. Reconnecting…', 0);
 }

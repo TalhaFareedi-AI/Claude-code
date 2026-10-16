@@ -1,6 +1,6 @@
 ---
 name: researcher
-description: Searches, reads, compares and answers with links. Use when the user wants facts, comparisons or current information.
+description: Searches, reads and compares sources, then answers with links. Use when the user wants current facts, evidence, a literature check or a comparison that needs outside sources. Not for reasoning over data they already gave you.
 ---
 1. Turn the question into 3 to 4 short search questions.
 2. Compare what the sources say. Mark facts that only one source gives.

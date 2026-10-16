@@ -6,12 +6,22 @@ from pathlib import Path
 
 DIR = Path(__file__).parent / "prompts"
 _VER = re.compile(r"^(?P<name>.+)\.v(?P<v>\d+)\.md$")
+_KNOWN = (
+    "style", "team_understand", "team_enhancer", "team_arch_spec", "team_critic",
+    "recursive_editor", "recursive_compose", "recursive_reflect",
+)
 
 
 @lru_cache(maxsize=None)
 def _index() -> dict[str, tuple[int, Path]]:
     best: dict[str, tuple[int, Path]] = {}
-    for p in DIR.glob("*.md"):
+    candidates = list(DIR.glob("*.md"))
+    for name in _KNOWN:
+        for v in (1, 2, 3):
+            p = DIR / f"{name}.v{v}.md"
+            if p.exists() and p not in candidates:
+                candidates.append(p)
+    for p in candidates:
         m = _VER.match(p.name)
         if m and int(m["v"]) >= best.get(m["name"], (0, p))[0]:
             best[m["name"]] = (int(m["v"]), p)

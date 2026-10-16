@@ -25,6 +25,15 @@ SEED = [
     ("anthropic/claude-opus-5.5", "Claude Opus 5.5", "Anthropic", "west", "genius", 4.0, 20.0, 1, "budget"),
     ("anthropic/claude-fable-5.1", "Claude Fable 5.1", "Anthropic", "west", "genius", 10.0, 50.0, 0, "budget"),
 ]
+# Picture models. They are kept apart because they answer with an image instead of text, they are
+# priced per picture (billed as output tokens), and nothing is drawn until the user picks one.
+IMAGE_SEED = [
+    ("google/gemini-3.1-flash-lite-image", "Nano Banana 2 Lite", "Google", "west", "quick", 0.25, 1.50),
+    ("google/gemini-3.1-flash-image", "Nano Banana 2", "Google", "west", "quick", 0.50, 3.00),
+    ("google/gemini-3-pro-image", "Nano Banana Pro", "Google", "west", "smart", 2.00, 12.00),
+    ("openai/gpt-5-image-mini", "GPT-5 Image Mini", "OpenAI", "west", "quick", 2.50, 2.00),
+    ("openai/gpt-5-image", "GPT-5 Image", "OpenAI", "west", "smart", 10.00, 10.00),
+]
 # Cached input is about 5% of the input price on Claude (section 8). Others: same as input.
 CACHED_FACTOR = {"anthropic": 0.05}
 CODING_BRAINS = ["moonshotai/kimi-k2.7-code", "qwen/qwen3-coder-next"]
@@ -44,6 +53,17 @@ def seed(db: DB) -> None:
         )
         db.run("INSERT INTO model_prices(model_id,price_in,price_out,started_at) VALUES(?,?,?,?)",
                (mid, pin, pout, now()))
+    for (mid, name, lab, region, tier, pin, pout) in IMAGE_SEED:
+        if db.one("SELECT id FROM model_catalog WHERE id=?", (mid,)):
+            continue
+        db.run(
+            "INSERT INTO model_catalog(id,name,lab,region,tier,price_in,price_out,price_cached,thinks,"
+            "reasoning_style,available,approved,private_route,source,updated_at,image_out)"
+            " VALUES(?,?,?,?,?,?,?,?,0,'none',1,1,1,'seed',?,1)",
+            (mid, name, lab, region, tier, pin, pout, pin, now()),
+        )
+        db.run("INSERT INTO model_prices(model_id,price_in,price_out,started_at) VALUES(?,?,?,?)",
+               (mid, pin, pout, now()))
 
 
 def get(db: DB, model_id: str) -> dict | None:
@@ -51,7 +71,9 @@ def get(db: DB, model_id: str) -> dict | None:
 
 
 def listing(db: DB, tiers_allowed: list[str] | None = None) -> list[dict]:
+    # image_out models answer with a picture, so they are never offered as a thinking brain.
     rows = db.all("SELECT * FROM model_catalog WHERE approved=1 AND available=1 AND id NOT LIKE '%:free' "
+                  "AND COALESCE(image_out,0)=0 "
                   "ORDER BY CASE tier WHEN 'quick' THEN 0 WHEN 'smart' THEN 1 ELSE 2 END, price_out")
     if tiers_allowed is not None:
         rows = [r for r in rows if r["tier"] in tiers_allowed]
@@ -83,10 +105,11 @@ def resolve(db: DB, tier: str, *, need_thinks: bool = False, exclude: tuple = ()
     return sorted(pool, key=_blend)[0]
 
 
-def fallbacks(db: DB, primary: str, n: int = 2, *, private_only: bool = False) -> list[str]:
+def fallbacks(db: DB, primary: str, n: int = 2, *, private_only: bool = False,
+              tiers_allowed: list[str] | None = None) -> list[str]:
     """Backup models for OpenRouter's `models` list: same tier first, cheapest first."""
     cur = get(db, primary)
-    rows = listing(db)
+    rows = listing(db, tiers_allowed)
     if private_only:
         rows = [r for r in rows if r["private_route"]]
     same = [r for r in rows if cur and r["tier"] == cur["tier"] and r["id"] != primary]
@@ -114,15 +137,28 @@ def sync_live(db: DB, live_models: list[dict]) -> dict:
             continue
         params = m.get("supported_parameters") or []
         thinks = 1 if ("reasoning" in params or "include_reasoning" in params) else 0
+        cached = _per_million(pr.get("input_cache_read"))
         db.run(
             "INSERT INTO model_catalog(id,name,lab,region,tier,price_in,price_out,price_cached,thinks,"
-            "reasoning_style,context,available,approved,private_route,source,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,1,0,1,'live',?)",
+            "reasoning_style,context,available,approved,private_route,source,updated_at,image_out) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,1,0,1,'live',?,?)",
             (mid, m.get("name") or mid, mid.split("/")[0], "unknown", _guess_tier(pout), pin, pout,
-             _per_million(pr.get("input_cache_read")) or pin, thinks, "effort", m.get("context_length"), now()),
+             pin if cached is None else cached, thinks, "effort", m.get("context_length"), now(),
+             1 if makes_images(m) else 0),
         )
         report["new"] += 1
     return report
+
+
+def makes_images(m: dict) -> bool:
+    arch = m.get("architecture") or {}
+    out = arch.get("output_modalities") or m.get("output_modalities") or []
+    return "image" in [str(x).lower() for x in out]
+
+
+def image_models(db: DB) -> list[dict]:
+    return db.all("SELECT * FROM model_catalog WHERE image_out=1 AND available=1 AND approved=1 "
+                  "AND id NOT LIKE '%:free' ORDER BY price_out, price_in")
 
 
 def _apply_live(db: DB, row: dict, m: dict, report: dict) -> None:
@@ -140,9 +176,9 @@ def _apply_live(db: DB, row: dict, m: dict, report: dict) -> None:
         cached = _per_million(pr.get("input_cache_read"))
         if cached is None:
             cached = pin * CACHED_FACTOR.get(row["id"].split("/")[0], 1.0)
-        db.run("UPDATE model_catalog SET price_in=?,price_out=?,price_cached=?,thinks=?,context=?,"
+        db.run("UPDATE model_catalog SET price_in=?,price_out=?,price_cached=?,thinks=?,context=?,image_out=?,"
                "available=1,source='live',updated_at=? WHERE id=?",
-               (pin, pout, cached, thinks, m.get("context_length"), now(), row["id"]))
+               (pin, pout, cached, thinks, m.get("context_length"), 1 if makes_images(m) else 0, now(), row["id"]))
     else:
         db.run("UPDATE model_catalog SET available=1, thinks=? WHERE id=?", (thinks, row["id"]))
     report["updated"] += 1

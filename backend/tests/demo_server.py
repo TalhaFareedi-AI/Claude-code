@@ -5,9 +5,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-os.environ.update(NO_AUTO_APP="1", DEV_MODE="1", BRAIN_POLICY="cheap")
+os.environ.update(NO_AUTO_APP="1", DEV_MODE="1", BRAIN_POLICY="cheap", ADMIN_EMAIL="admin@example.com", ADMIN_PASSWORD="admin-pass-123")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+os.environ.setdefault("UNLOCK_ALL", "0")  # tests use normal plan rules unless asked (UNLOCK_ALL=1 python demo_server.py)
 
 import uvicorn
 
@@ -20,7 +22,7 @@ from fake_openrouter import FakeOpenRouter
 tmp = Path(tempfile.mkdtemp())
 settings.workspace_root = tmp / "ws"
 fake = FakeOpenRouter()
-fake.delay = 0
+fake.delay = float(os.environ.get('FAKE_DELAY', '0.6'))
 llm = OpenRouter(api_key="demo-key", base_url="http://fake", transport=fake.transport())
 app = create_app(llm=llm, db=DB(str(tmp / "demo.db")))
 

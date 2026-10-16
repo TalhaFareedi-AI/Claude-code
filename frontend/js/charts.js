@@ -4,19 +4,38 @@ import { h, svg, fmtNum } from './dom.js';
 import { compile } from './formula.js';
 
 const COLORS = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--c4)', 'var(--c5)', 'var(--c6)'];
-let W = 640, H = 320;                       // set on every draw from the real width, so text stays readable on phones
 const M = { l: 56, r: 14, t: 14, b: 38 };
 
 function niceTicks(lo, hi, n = 5) {
-  if (!(hi > lo)) { hi = lo + 1; }
-  const step0 = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
+  if (!(hi > lo)) {
+    const pad = Math.abs(lo) * 0.05 || 1;
+    const lower = lo - pad, upper = hi + pad;
+    if (Number.isFinite(lower)) lo = lower;
+    if (Number.isFinite(upper)) hi = upper;
+  }
+  const span = hi - lo, step0 = span / n;
+  // Finite recipes may have an overflowing range, or a range smaller than one
+  // representable tick at this magnitude. Endpoints give those ranges a scale.
+  if (!Number.isFinite(span) || !(step0 > 0)) return [lo, hi];
+  const mag = Math.pow(10, Math.floor(Math.log10(step0)));
   const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= step0) || 10 * mag;
+  if (!Number.isFinite(step) || !(step > 0)) return [lo, hi];
   const start = Math.floor(lo / step) * step, out = [];
-  for (let v = start; v <= hi + step * 0.5; v += step) out.push(+v.toPrecision(12));
-  return out;
+  // Never increment a float until it passes a bound: v + step can equal v and
+  // freeze the tab. Index-based ticks also keep ordinary ranges evenly spaced.
+  for (let k = 0; k < 32; k++) {
+    const v = start + k * step;
+    if (!Number.isFinite(v) || (out.length && v <= out[out.length - 1])) return [lo, hi];
+    out.push(v);
+    if (v >= hi) return out.length > 1 ? out : [lo, hi];
+  }
+  return [lo, hi];
 }
 
 export function renderChart(recipe) {
+  // Each chart owns its geometry, including the closures used by hover events.
+  let W = 640, H = 320;
   const inputs = recipe.inputs || [];
   const values = Object.fromEntries(inputs.map((i) => [i.id, i.value]));
   const isCat = recipe.chart === 'bar' || recipe.chart === 'pie';
@@ -51,8 +70,10 @@ export function renderChart(recipe) {
     controls.querySelectorAll('input').forEach((el) => { el.value = values[el.dataset.id]; readouts[el.dataset.id].textContent = fmtNum(values[el.dataset.id]); });
     draw();
   } });
+  const badgeText = recipe.badge || (isCat && !inputs.length ? 'Chart from your data' : 'Computed plot');
+  const headRow = h('div', { class: 'art-head' }, h('h3', { text: recipe.title }), h('span', { class: 'visual-badge', text: badgeText }));
   const root = h('div', { class: 'art chart', role: 'group', 'aria-label': `Chart: ${recipe.title}` },
-    h('h3', { text: recipe.title }), inputs.length ? controls : null, box, legend, note, inputs.length ? reset : null);
+    headRow, inputs.length ? controls : null, box, legend, note, inputs.length ? reset : null);
   box.append(tip);
 
   let raf = 0;
@@ -66,7 +87,7 @@ export function renderChart(recipe) {
     let lo, hi;
     try { lo = xFrom(values); hi = xTo(values); } catch { lo = 0; hi = 1; }
     if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) { lo = 0; hi = 1; }
-    const xs = Array.from({ length: steps + 1 }, (_, k) => lo + ((hi - lo) * k) / steps);
+    const xs = Array.from({ length: steps + 1 }, (_, k) => lo * (1 - k / steps) + hi * (k / steps));
     const series = lines.map((l) => ({ name: l.name, vals: xs.map((x) => { try { return l.f({ ...values, x }); } catch { return NaN; } }) }));
     return { xs, series };
   }
@@ -87,7 +108,11 @@ export function renderChart(recipe) {
     if (!all.length) { lo = 0; hi = 1; }
     if (recipe.chart === 'bar' || recipe.chart === 'area') lo = Math.min(lo, 0);
     const yt = niceTicks(lo, hi), y0 = yt[0], y1 = yt[yt.length - 1];
-    const px = (v, a, b, lo2, hi2) => a + ((v - lo2) / (hi2 - lo2 || 1)) * (b - a);
+    const px = (v, a, b, lo2, hi2) => {
+      const span = hi2 - lo2;
+      const ratio = Number.isFinite(span) ? (v - lo2) / (span || 1) : (v / 2 - lo2 / 2) / (hi2 / 2 - lo2 / 2);
+      return a + ratio * (b - a);
+    };
     const Y = (v) => px(v, H - M.b, M.t, y0, y1);
     for (const t of yt) {
       root.append(svg('line', { class: 'grid', x1: M.l, x2: W - M.r, y1: Y(t), y2: Y(t) }));
@@ -215,4 +240,227 @@ export function renderQuiz(quiz) {
 export function renderSvg(svgText) {
   const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);   // an <img> never runs scripts
   return h('div', { class: 'art svg-art' }, h('img', { src: url, alt: 'Diagram made by the assistant', loading: 'lazy' }));
+}
+
+// Flashcards: flip, step and shuffle entirely in the browser. Reviewing a deck costs 0 tokens.
+export function renderFlashcards(deck) {
+  let order = deck.cards.map((_, i) => i), at = 0, shown = false;
+  const known = new Set();
+  const face = h('div', { class: 'card-face' });
+  const counter = h('span', { class: 'muted small' });
+  const score = h('span', { class: 'muted small' });
+  const hintBtn = h('button', { type: 'button', class: 'btn small', text: 'Hint' });
+  const flip = h('button', { type: 'button', class: 'btn primary', text: 'Show answer' });
+
+  function paint() {
+    const c = deck.cards[order[at]];
+    face.replaceChildren(h('div', { class: 'card-side' + (shown ? ' back' : ''), text: shown ? c.back : c.front }));
+    counter.textContent = `${at + 1} of ${deck.cards.length}`;
+    score.textContent = known.size ? `${known.size} marked known` : '';
+    flip.textContent = shown ? 'Show question' : 'Show answer';
+    hintBtn.hidden = shown || !c.hint;
+  }
+  const step = (d) => { at = (at + d + deck.cards.length) % deck.cards.length; shown = false; paint(); };
+  flip.addEventListener('click', () => { shown = !shown; paint(); });
+  hintBtn.addEventListener('click', () => { const c = deck.cards[order[at]]; if (c.hint) face.append(h('div', { class: 'muted small', text: 'Hint: ' + c.hint })); hintBtn.hidden = true; });
+  face.addEventListener('click', () => { shown = !shown; paint(); });
+
+  const root = h('div', { class: 'art flashcards' }, h('h3', { text: deck.title }),
+    face,
+    h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn small', text: '← Back', onclick: () => step(-1) }),
+      flip, hintBtn,
+      h('button', { type: 'button', class: 'btn small', text: 'Next →', onclick: () => step(1) })),
+    h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn small', text: '✓ I knew it', onclick: () => { known.add(order[at]); step(1); } }),
+      h('button', { type: 'button', class: 'btn small', text: '🔀 Shuffle', onclick: () => { order = order.map((v) => [Math.random(), v]).sort((a, b) => a[0] - b[0]).map((p) => p[1]); at = 0; shown = false; paint(); } }),
+      counter, score));
+  paint();
+  return root;
+}
+
+// Sortable table. Clicking a header re-sorts in the browser, so it costs no tokens.
+export function renderTable(t) {
+  let sortKey = null, asc = true;
+  const body = h('tbody');
+  const cell = (col, row) => {
+    const v = row[col.key];
+    if (col.type === 'number') return v == null ? '–' : (col.unit ? `${col.unit}${fmtNum(v)}` : fmtNum(v));
+    return String(v ?? '');
+  };
+  function paint() {
+    const rows = [...t.rows];
+    if (sortKey) {
+      const col = t.columns.find((c) => c.key === sortKey);
+      rows.sort((a, b) => {
+        const x = a[sortKey], y = b[sortKey];
+        if (col.type === 'number') return ((x ?? -Infinity) - (y ?? -Infinity)) * (asc ? 1 : -1);
+        return String(x).localeCompare(String(y), undefined, { numeric: true }) * (asc ? 1 : -1);
+      });
+    }
+    body.replaceChildren(...rows.map((r) => h('tr', null, t.columns.map((c) => h('td', { class: c.type === 'number' ? 'num' : '', text: cell(c, r) })))));
+  }
+  const head = h('tr', null, t.columns.map((c) => {
+    const btn = h('button', { type: 'button', class: 'th-sort', 'aria-label': `Sort by ${c.label}` }, c.label, h('span', { class: 'arrow' }));
+    btn.addEventListener('click', () => {
+      asc = sortKey === c.key ? !asc : true; sortKey = c.key;
+      head.querySelectorAll('.arrow').forEach((a) => { a.textContent = ''; });
+      btn.querySelector('.arrow').textContent = asc ? ' ▲' : ' ▼';
+      paint();
+    });
+    return h('th', { class: c.type === 'number' ? 'num' : '' }, btn);
+  }));
+  paint();
+  return h('div', { class: 'art table-art' }, h('h3', { text: t.title }),
+    h('div', { class: 'tbl-scroll' }, h('table', { class: 'data-table' }, h('thead', null, head), body)),
+    h('p', { class: 'muted tiny', text: 'Click a column heading to sort.' }));
+}
+
+// A written document or deck. The full text lives in a real file in the workspace; this is the card for it.
+export function renderDoc(d, kind = 'doc') {
+  const open = () => document.dispatchEvent(new CustomEvent('sh:open-file', { detail: { id: d.file_id, name: d.name, kind } }));
+  const meta = kind === 'slides' ? `${d.slides} slides` : `${(d.words || 0).toLocaleString('en')} words`;
+  const preview = h('div', { class: 'doc-preview' });
+  preview.append(renderMarkdownInto(d.body.slice(0, 1200)));
+  const card = h('div', { class: 'art doc-art', role: 'group', 'aria-label': `${kind === 'slides' ? 'Deck' : 'Document'}: ${d.title}` },
+    h('div', { class: 'doc-head' },
+      h('span', { class: 'doc-ico', 'aria-hidden': 'true', text: kind === 'slides' ? '📊' : '📄' }),
+      h('div', { class: 'doc-meta' }, h('b', { text: d.title }), h('span', { class: 'muted tiny', text: `${meta} · saved as ${d.name}` })),
+      h('button', { type: 'button', class: 'btn small primary', text: 'Open', onclick: open })),
+    preview,
+    h('button', { type: 'button', class: 'doc-more', text: 'Open the full document →', onclick: open }));
+  return card;
+}
+
+// renderMarkdown lives in markdown.js; charts.js stays free of that import by resolving it lazily.
+let mdRender = null;
+export function setMarkdownRenderer(fn) { mdRender = fn; }
+function renderMarkdownInto(text) {
+  if (mdRender) return mdRender(text);
+  return h('pre', { class: 'muted small', text });
+}
+
+// A generated picture. The bytes live in the user's workspace, so the <img> uses a short-lived signed link.
+export function renderImage(d) {
+  const img = h('img', { alt: d.prompt || 'Generated picture', loading: 'lazy' });
+  const box = h('div', { class: 'art image-art' },
+    img,
+    h('div', { class: 'img-foot' },
+      h('span', { class: 'muted tiny', text: `${d.name} · drawn by ${d.model}` }),
+      h('button', { type: 'button', class: 'btn small', text: 'Open', onclick: () => document.dispatchEvent(new CustomEvent('sh:open-file', { detail: { id: d.file_id, name: d.name, kind: 'image' } })) })));
+  fetch(`/api/files/${encodeURIComponent(d.file_id)}/link`)
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error('link'))))
+    .then(({ url }) => { img.src = url; })
+    .catch(() => { box.replaceChildren(h('p', { class: 'muted small', text: 'The picture is no longer available.' })); });
+  return box;
+}
+
+
+// Interactive D3-style Architecture Diagram (section 5 & section 16, pages 23, 72-73).
+// Click any component box to inspect its Input, Process, and Output card; zoom and pan to explore.
+export function renderD3Diagram(spec) {
+  const nodes = spec.nodes || [];
+  const edges = spec.edges || [];
+  let selectedId = nodes[0]?.id || null;
+  let scale = 1;
+
+  const cols = Math.min(4, Math.max(2, nodes.length));
+  const rows = Math.ceil(nodes.length / cols);
+  const W = Math.max(640, cols * 185 + 40);
+  const H = Math.max(210, rows * 105 + 40);
+
+  const pos = {};
+  nodes.forEach((n, idx) => {
+    const r = Math.floor(idx / cols);
+    const c = idx % cols;
+    pos[n.id] = { x: 24 + c * 180, y: 24 + r * 96 };
+  });
+
+  const inspector = h('div', { class: 'd3-inspector', 'aria-live': 'polite' });
+  const stageWrap = h('div', { class: 'd3-stage' });
+
+  function paintInspector() {
+    const cur = nodes.find((n) => n.id === selectedId) || nodes[0];
+    if (!cur) return;
+    inspector.replaceChildren(
+      h('div', { class: 'd3-card-title' }, h('b', { text: cur.label }), h('span', { class: 'muted tiny', text: `Node: ${cur.id}` })),
+      h('div', { class: 'd3-io-grid' },
+        h('div', { class: 'd3-io' }, h('span', { class: 'muted tiny', text: 'Input' }), h('div', { text: cur.input || '–' })),
+        h('div', { class: 'd3-io' }, h('span', { class: 'muted tiny', text: 'Inside process' }), h('div', { text: cur.process || '–' })),
+        h('div', { class: 'd3-io' }, h('span', { class: 'muted tiny', text: 'Output' }), h('div', { text: cur.output || '–' }))));
+  }
+
+  function drawGraph() {
+    const rootSvg = svg('svg', {
+      class: 'd3-svg',
+      viewBox: `0 0 ${W} ${H}`,
+      style: `transform: scale(${scale}); transform-origin: top left;`,
+      role: 'img',
+      'aria-label': spec.title || 'Architecture diagram',
+    });
+
+    const defs = svg('defs');
+    const marker = svg('marker', { id: 'd3-arrow', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse' });
+    marker.append(svg('path', { d: 'M 0 1 L 10 5 L 0 9 z', fill: 'var(--accent)' }));
+    defs.append(marker);
+    rootSvg.append(defs);
+
+    for (const [src, dst] of edges) {
+      const p1 = pos[src], p2 = pos[dst];
+      if (!p1 || !p2) continue;
+      rootSvg.append(svg('line', {
+        x1: p1.x + 75, y1: p1.y + 34, x2: p2.x + 75, y2: p2.y + 34,
+        stroke: 'var(--accent)', 'stroke-width': 2, 'marker-end': 'url(#d3-arrow)', opacity: 0.75,
+      }));
+    }
+
+    for (const n of nodes) {
+      const p = pos[n.id];
+      const active = n.id === selectedId;
+      const g = svg('g', { class: 'd3-node' + (active ? ' active' : ''), style: 'cursor:pointer', tabindex: '0', role: 'button', 'aria-label': n.label });
+      g.append(
+        svg('rect', {
+          x: p.x, y: p.y, width: 152, height: 68, rx: 10,
+          fill: active ? 'var(--accent-soft, #e6f4f1)' : 'var(--panel, #ffffff)',
+          stroke: active ? 'var(--accent, #2a7f6f)' : 'var(--border, #cbd5e1)',
+          'stroke-width': active ? 2.5 : 1.5,
+        }),
+        svg('text', { x: p.x + 10, y: p.y + 22, 'font-weight': '700', 'font-size': '11.5', fill: 'var(--fg, #0f172a)' }, n.label.slice(0, 22)),
+        svg('text', { x: p.x + 10, y: p.y + 40, 'font-size': '10', fill: 'var(--muted, #64748b)' }, `In: ${(n.input || '').slice(0, 22)}`),
+        svg('text', { x: p.x + 10, y: p.y + 55, 'font-size': '10', fill: 'var(--accent, #2a7f6f)' }, `Out: ${(n.output || '').slice(0, 22)}`),
+      );
+      g.addEventListener('click', () => { selectedId = n.id; paintInspector(); drawGraph(); });
+      rootSvg.append(g);
+    }
+
+    stageWrap.replaceChildren(rootSvg);
+  }
+
+  paintInspector();
+  drawGraph();
+
+  const zoomRow = h('div', { class: 'btn-row' },
+    h('button', { type: 'button', class: 'btn small', text: '＋ Zoom in', onclick: () => { scale = Math.min(1.5, +(scale + 0.15).toFixed(2)); drawGraph(); } }),
+    h('button', { type: 'button', class: 'btn small', text: '− Zoom out', onclick: () => { scale = Math.max(0.7, +(scale - 0.15).toFixed(2)); drawGraph(); } }),
+    h('button', { type: 'button', class: 'btn small', text: 'Reset view', onclick: () => { scale = 1; drawGraph(); } }),
+    h('span', { class: 'muted tiny', text: 'Click any component box to inspect its inputs, processing, and outputs.' }));
+
+  return h('div', { class: 'art d3-diagram', role: 'group', 'aria-label': `Architecture diagram: ${spec.title}` },
+    h('div', { class: 'art-head' }, h('h3', { text: spec.title || 'Interactive Architecture Diagram' }),
+      h('span', { class: 'visual-badge', text: spec.badge || 'Interactive architecture diagram' })),
+    stageWrap,
+    zoomRow,
+    inspector,
+    spec.explanation ? h('p', { class: 'small muted', text: spec.explanation }) : null);
+}
+
+// Python Scientific Plot (section 5, page 23): waveforms, FFT spectra, and research curves.
+export function renderSciencePlot(data) {
+  const wrap = h('div', { class: 'art science-plot', role: 'group', 'aria-label': `Scientific plot: ${data.title}` },
+    h('div', { class: 'art-head' }, h('h3', { text: data.title || 'Scientific Plot' }),
+      h('span', { class: 'visual-badge', text: data.badge || 'Computed plot' })));
+  if (data.svg) {
+    wrap.append(renderSvg(data.svg));
+  }
+  return wrap;
 }

@@ -13,15 +13,15 @@ PRO = ["pro", "school"]
 MODES = [
     {"id": "fast", "name": "Fast", "blurb": "One quick answer, no scrap paper", "runner": "single", "big": False,
      "steps": ["answer"], "slots": {"answer": "tier:quick"}, "reasoning": {"answer": "off"},
-     "max_tokens": {"answer": 1200}, "params": {}, "max_credits": 10, "plans": ALL},
+     "max_tokens": {"answer": 500}, "params": {}, "max_credits": 10, "plans": ALL},
     {"id": "normal", "name": "Normal", "blurb": "One answer with a little thinking", "runner": "single", "big": False,
      "steps": ["answer"], "slots": {"answer": "tier:smart"}, "reasoning": {"answer": "low"},
-     "max_tokens": {"answer": 2500}, "params": {}, "max_credits": 30, "plans": ALL},
+     "max_tokens": {"answer": 3000}, "params": {}, "max_credits": 30, "plans": ALL},
     {"id": "deep", "name": "Deep", "blurb": "Plan, do the steps, check", "runner": "deep", "big": True,
      "steps": ["planner", "worker", "checker", "answer"],
      "slots": {"planner": "tier:smart", "worker": "tier:smart", "checker": "tier:quick", "answer": "tier:smart"},
      "reasoning": {"planner": "low", "worker": "medium", "checker": "off", "answer": "low"},
-     "max_tokens": {"planner": 1200, "worker": 3000, "checker": 600, "answer": 2500},
+     "max_tokens": {"planner": 1200, "worker": 3000, "checker": 600, "answer": 3500},
      "params": {"max_steps": 8}, "max_credits": 150, "plans": PAID},
     {"id": "think_again", "name": "Think Again", "blurb": "Write, get marked by a critic, rewrite", "runner": "think_again",
      "big": True, "steps": ["write", "critic", "rewrite"],
@@ -31,12 +31,12 @@ MODES = [
     {"id": "overthink", "name": "Overthink", "blurb": "Several long-thinking tries, a judge picks the best",
      "runner": "overthink", "big": True, "steps": ["think", "judge"],
      "slots": {"think": "tier:genius", "judge": "tier:genius"},
-     "reasoning": {"think": "high", "judge": "low"}, "max_tokens": {"think": 8000, "judge": 1500},
+     "reasoning": {"think": "high", "judge": "low"}, "max_tokens": {"think": 8000, "judge": 3000},
      "params": {"default_tries": 3, "max_tries": 5}, "max_credits": 160, "plans": PRO, "daily_limit": 5},
     {"id": "council", "name": "Council", "blurb": "Different brains answer alone, a judge merges them",
      "runner": "council", "big": True, "steps": ["members", "judge"],
      "slots": {"members": ["tier:smart", "tier:smart", "tier:smart"], "judge": "tier:smart"},
-     "reasoning": {"members": "medium", "judge": "low"}, "max_tokens": {"members": 2500, "judge": 2000},
+     "reasoning": {"members": "medium", "judge": "low"}, "max_tokens": {"members": 2500, "judge": 3000},
      "params": {"min_members": 3, "max_members": 5}, "max_credits": 80, "plans": PRO, "daily_limit": 5},
     {"id": "two_brains", "name": "Two Brains", "blurb": "One brain thinks and writes notes, another answers",
      "runner": "two_brains", "big": True, "steps": ["think", "answer"],
@@ -53,13 +53,13 @@ MODES = [
      "runner": "research", "big": True, "steps": ["planner", "search", "writer"],
      "slots": {"planner": "tier:quick", "search": "tier:smart", "writer": "tier:smart"},
      "reasoning": {"planner": "off", "search": "low", "writer": "low"},
-     "max_tokens": {"planner": 600, "search": 1500, "writer": 2500},
+     "max_tokens": {"planner": 600, "search": 1500, "writer": 3000},
      "params": {"max_searches": 4}, "max_credits": 60, "plans": PAID},
     {"id": "developer", "name": "Developer", "blurb": "Deep loop plus skills for design, code and prompts",
      "runner": "deep", "big": True, "steps": ["planner", "worker", "checker", "answer"],
      "slots": {"planner": "tier:smart", "worker": "code", "checker": "tier:quick", "answer": "tier:smart"},
      "reasoning": {"planner": "low", "worker": "medium", "checker": "off", "answer": "low"},
-     "max_tokens": {"planner": 1200, "worker": 3500, "checker": 600, "answer": 3000},
+     "max_tokens": {"planner": 1200, "worker": 3500, "checker": 600, "answer": 4000},
      "params": {"max_steps": 8, "skills": True}, "max_credits": 160, "plans": PAID},
 ]
 
@@ -83,4 +83,8 @@ def listing(db: DB) -> list[dict]:
 
 
 def allowed(mode: dict, plan: str) -> bool:
+    from . import plans
+    unlocked = plans.rules(plan).get("modes")
+    if unlocked is not None:
+        return mode["id"] in unlocked
     return plan in mode["plans"]

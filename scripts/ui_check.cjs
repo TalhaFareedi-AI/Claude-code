@@ -70,13 +70,14 @@ const check = (name, ok, extra = '') => { results.push({ name, ok }); console.lo
   await page.click('#settings-close');
   await page.fill('#composer-text', 'Make a 5 slides PPT on plants');
   await page.click('#send-btn');
-  await page.waitForSelector('.file .name', { timeout: 25000 });
+  await page.locator('.file .name').filter({ hasText: /\.pptx$/i }).first().waitFor({ state: 'visible', timeout: 25000 });
   await page.waitForFunction(() => !document.querySelector('.run.working'), null, { timeout: 25000 });
-  check('PPT file card appears with Open and Download', /pptx/.test(await page.locator('.file .name').first().innerText()) && await page.locator('.file button:has-text("Download")').count() >= 1);
-  await page.locator('.file button:has-text("Open")').first().click();
+  const pptFile = page.locator('.file').filter({ has: page.locator('.name').filter({ hasText: /\.pptx$/i }) }).first();
+  check('PPT file card appears with Open and Download', /pptx/.test(await pptFile.locator('.name').innerText()) && await pptFile.locator('button:has-text("Download")').count() === 1);
+  await pptFile.locator('button:has-text("Open")').click();
   await page.waitForSelector('#preview:not([hidden]) .slide');
   check('Open shows a slide preview', (await page.locator('#preview .slide').count()) >= 3);
-  const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('.file button:has-text("Download")').first().click()]);
+  const [dl] = await Promise.all([page.waitForEvent('download'), pptFile.locator('button:has-text("Download")').click()]);
   check('Download works through a signed link', /\.pptx$/.test(dl.suggestedFilename()));
   await page.screenshot({ path: `${SHOTS}/06-files.png` });
 
@@ -114,6 +115,33 @@ const check = (name, ok, extra = '') => { results.push({ name, ok }); console.lo
   await m.waitForTimeout(400);
   check('phone: chart fits the screen', await m.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth));
   await m.screenshot({ path: `${SHOTS}/11-mobile-chart.png` });
+
+  // new artifact types render and stay interactive without any further model call
+  const art = await page.evaluate(async () => {
+    const { renderFlashcards, renderTable } = await import('/js/charts.js');
+    const deck = renderFlashcards({ title: 'Planets', cards: [
+      { front: 'Closest to the Sun?', back: 'Mercury', hint: 'Smallest' },
+      { front: 'The red planet?', back: 'Mars' }, { front: 'Largest planet?', back: 'Jupiter' }] });
+    document.body.append(deck);
+    const front = deck.querySelector('.card-side').textContent;
+    deck.querySelector('.card-face').click();
+    const back = deck.querySelector('.card-side').textContent;
+    [...deck.querySelectorAll('button')].find((b) => b.textContent.includes('Next')).click();
+    const next = deck.querySelector('.card-side').textContent;
+
+    const tbl = renderTable({ title: 'Compare', columns: [{ key: 'n', label: 'Name' }, { key: 'v', label: 'Value', type: 'number', unit: '$' }],
+      rows: [{ n: 'b', v: 2 }, { n: 'a', v: 10 }, { n: 'c', v: null }] });
+    document.body.append(tbl);
+    const firstBefore = tbl.querySelector('tbody td').textContent;
+    tbl.querySelectorAll('th .th-sort')[0].click();
+    const firstAfterName = tbl.querySelector('tbody td').textContent;
+    tbl.querySelectorAll('th .th-sort')[1].click();
+    const numCells = [...tbl.querySelectorAll('tbody tr')].map((r) => r.children[1].textContent);
+    return { front, back, next, firstBefore, firstAfterName, numCells, numAligned: !!tbl.querySelector('td.num') };
+  });
+  check('flashcards flip and step in the browser', art.front.includes('Closest') && art.back === 'Mercury' && art.next.includes('red planet'));
+  check('tables sort by text and by number, and show units', art.firstBefore === 'b' && art.firstAfterName === 'a'
+    && art.numCells[0] === '–' && art.numCells[2] === '$10' && art.numAligned, JSON.stringify(art.numCells));
 
   check('no browser errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await browser.close();
