@@ -14,7 +14,7 @@ from .db import jdump, now
 from .tools import calc as calc_tool, diagram
 
 NEXT = re.compile(r"\[\[\s*next\s*:\s*(.+?)\]\]", re.I | re.S)
-BLOCK = re.compile(r"```(chart|svg|quiz)[ \t]*\n(.*?)```", re.S)
+BLOCK = re.compile(r"```(chart|svg|quiz|flashcards|table)[ \t]*\n(.*?)```", re.S)
 MARK = re.compile(r"\[\[artifact:(a_[0-9a-f]{8,12})\]\]")
 DEFAULT_BUTTONS = ["Explain simpler", "Quiz me", "Show a graph"]
 MAX_FIX = 2
@@ -38,6 +38,59 @@ def validate_quiz(q) -> dict:
         out.append({"q": item["q"][:300], "options": [str(o)[:120] for o in opts], "answer": ans,
                     "why": str(item.get("why", ""))[:300]})
     return {"questions": out}
+
+
+def validate_flashcards(d) -> dict:
+    cards = d.get("cards") if isinstance(d, dict) else None
+    if not isinstance(cards, list) or not 3 <= len(cards) <= 20:
+        raise ValueError("flashcards need between 3 and 20 cards")
+    out, seen = [], set()
+    for c in cards:
+        if not isinstance(c, dict) or not str(c.get("front", "")).strip() or not str(c.get("back", "")).strip():
+            raise ValueError("every card needs a front and a back")
+        front = str(c["front"]).strip()[:120]
+        if front.lower() in seen:
+            continue
+        seen.add(front.lower())
+        out.append({"front": front, "back": str(c["back"]).strip()[:240],
+                    "hint": str(c.get("hint", "")).strip()[:120] or None})
+    if len(out) < 3:
+        raise ValueError("too many duplicate cards")
+    return {"title": str(d.get("title", "Flashcards"))[:80], "cards": out}
+
+
+def validate_table(d) -> dict:
+    cols, rows = (d.get("columns"), d.get("rows")) if isinstance(d, dict) else (None, None)
+    if not isinstance(cols, list) or not 2 <= len(cols) <= 8:
+        raise ValueError("a table needs 2 to 8 columns")
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 60:
+        raise ValueError("a table needs 1 to 60 rows")
+    clean_cols, keys = [], []
+    for c in cols:
+        if not isinstance(c, dict) or not str(c.get("key", "")).strip():
+            raise ValueError("every column needs a key")
+        key = str(c["key"]).strip()[:40]
+        keys.append(key)
+        clean_cols.append({"key": key, "label": str(c.get("label", key))[:60],
+                           "type": "number" if c.get("type") == "number" else "text",
+                           "unit": str(c.get("unit", ""))[:12]})
+    clean_rows = []
+    for r in rows:
+        if not isinstance(r, dict):
+            raise ValueError("every row must be an object")
+        row = {}
+        for col in clean_cols:
+            v = r.get(col["key"], "")
+            if col["type"] == "number":
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    v = None
+            else:
+                v = str(v)[:120]
+            row[col["key"]] = v
+        clean_rows.append(row)
+    return {"title": str(d.get("title", "Table"))[:80], "columns": clean_cols, "rows": clean_rows}
 
 
 def new_artifact(ctx, kind: str, data: dict) -> dict:
@@ -101,6 +154,18 @@ async def handle_block(ctx, kind: str, body: str) -> str:
                     ctx.notices.append("The quiz was not readable, so I left it out.")
                     return ""
                 raw = await repair(ctx, "quiz", raw, str(e))
+    if kind in ("flashcards", "table"):
+        validator = validate_flashcards if kind == "flashcards" else validate_table
+        raw = body
+        for attempt in range(MAX_FIX + 1):
+            try:
+                data = validator(parse_json(raw))
+                return f"\n\n[[artifact:{new_artifact(ctx, kind, data)['id']}]]\n\n"
+            except (ValueError, KeyError, AttributeError, TypeError) as e:
+                if attempt == MAX_FIX:
+                    ctx.notices.append(f"The {kind} block was not readable, so I left it out.")
+                    return ""
+                raw = await repair(ctx, kind, raw, str(e))
     if kind == "svg":
         return await svg_artifact(ctx, body)
     return ""

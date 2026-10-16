@@ -104,7 +104,7 @@ class OpenRouter:
             raise ValueError("max_tool_calls must be an integer from 1 to 30")
         if stop_server_tools_when is not None:
             _validate_server_tool_stops(stop_server_tools_when)
-        body: dict = {"model": model, "messages": messages, "max_tokens": max_tokens,
+        body: dict = {"model": model, "messages": mark_cacheable(model, messages), "max_tokens": max_tokens,
                       "usage": {"include": True}}
         if fallbacks:
             body["models"] = [model] + [m for m in fallbacks if m != model]
@@ -264,6 +264,28 @@ class OpenRouter:
         if r.status_code >= 400:
             raise self._safe_error(OpenRouterError(_err_text(r), r.status_code))
         return r.json().get("data", {})
+
+
+# Anthropic models only cache a prefix when it is marked; DeepSeek, OpenAI, Gemini, Grok and Moonshot cache on their own.
+CACHE_MARK_PREFIXES = ("anthropic/",)
+CACHE_MIN_CHARS = 2000  # roughly 1,000 tokens: below the provider minimum a mark just wastes a write
+
+
+def mark_cacheable(model: str, messages: list) -> list:
+    """Mark the stable system prefix so a repeat within the cache window is billed at a fraction of the price.
+
+    Only the system message is marked: it is identical across turns, while the user turn never repeats.
+    """
+    if not model.startswith(CACHE_MARK_PREFIXES) or not messages:
+        return messages
+    first = messages[0]
+    if first.get("role") != "system" or not isinstance(first.get("content"), str):
+        return messages
+    if len(first["content"]) < CACHE_MIN_CHARS:
+        return messages
+    marked = {**first, "content": [{"type": "text", "text": first["content"],
+                                    "cache_control": {"type": "ephemeral"}}]}
+    return [marked, *messages[1:]]
 
 
 def _usage(u: dict) -> Usage:

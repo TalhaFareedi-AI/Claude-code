@@ -318,3 +318,26 @@ def test_nonstream_error_preserves_reported_cost():
         OpenRouter._parse({"error": {"message": "failed", "code": 502}, "usage": {"cost": 0.002}}, "test/model")
     assert caught.value.status == 502
     assert caught.value.usage.cost == 0.002
+
+
+def test_only_claude_gets_an_explicit_cache_mark():
+    """Anthropic needs cache_control; the others cache on their own, so a mark would only add noise."""
+    from app.openrouter import mark_cacheable
+    long_system, short_system = "x" * 2500, "y" * 100
+    msgs = lambda sysmsg: [{"role": "system", "content": sysmsg}, {"role": "user", "content": "hi"}]
+
+    marked = mark_cacheable("anthropic/claude-sonnet-5.5", msgs(long_system))
+    assert marked[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert marked[0]["content"][0]["text"] == long_system
+    assert marked[1] == {"role": "user", "content": "hi"}        # the user turn is never marked
+
+    assert mark_cacheable("deepseek/deepseek-v4.1-flash", msgs(long_system))[0]["content"] == long_system
+    assert mark_cacheable("anthropic/claude-sonnet-5.5", msgs(short_system))[0]["content"] == short_system
+    assert mark_cacheable("anthropic/claude-sonnet-5.5", [{"role": "user", "content": "hi"}])[0]["role"] == "user"
+
+
+async def test_the_cache_mark_reaches_the_request_body(llm, fake):
+    await llm.chat("anthropic/claude-sonnet-5.5", [{"role": "system", "content": "s" * 2500},
+                                                   {"role": "user", "content": "hi"}], max_tokens=50)
+    sent = fake.requests[-1]["messages"][0]["content"]
+    assert isinstance(sent, list) and sent[0]["cache_control"]["type"] == "ephemeral"

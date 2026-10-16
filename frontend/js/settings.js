@@ -9,7 +9,7 @@ export const ACCENTS = { teal: '#2a7f6f', blue: '#2f6fd1', violet: '#7a55c9', or
 export const DEFAULTS = {
   mode: 'auto', brains: {}, effort: 'auto', rounds: null, tries: null, cap: null,
   tools: ['chart', 'diagram', 'documents', 'ppt', 'web'], skills: null, private: false,
-  team: {}, teacher_enabled: true, teacher_model: null,
+  team: {}, teacher_enabled: false, teacher_model: null,
 };
 
 const TIER_LABEL = { quick: 'Quick (cheap, fast)', smart: 'Smart (all-rounder)', genius: 'Genius (strongest)' };
@@ -43,7 +43,7 @@ export const TABS = [
   { id: 'brains', icon: '🧠', label: 'Brains', hint: 'Which AI model does each job' },
   { id: 'planning', icon: '🗺️', label: 'Planning', hint: 'A team that plans big tasks first' },
   { id: 'research', icon: '🔎', label: 'Research', hint: 'Web search with sources' },
-  { id: 'build', icon: '✅', label: 'Build and check', hint: 'Who writes, reviews and explains' },
+  { id: 'build', icon: '✅', label: 'Build and check', hint: 'Who writes and reviews, and the teaching mode' },
   { id: 'limits', icon: '⚡', label: 'Effort and limits', hint: 'How hard to think and how much to spend' },
   { id: 'tools', icon: '🧰', label: 'Tools and skills', hint: 'What the AI may use' },
   { id: 'display', icon: '🎨', label: 'Display', hint: 'How it looks and moves' },
@@ -183,7 +183,7 @@ export function buildSettings(boot, S, { onChange, focus, display, onDisplay }) 
     if (id === 'brains') return Object.keys(S.brains).length ? 'Custom' : 'Auto';
     if (id === 'planning') return teamName(S.team);
     if (id === 'research') { const r = S.team?.researchers; return r?.enabled === false || r?.count === 0 ? 'Off' : r?.count ? `${r.count} on` : 'Auto'; }
-    if (id === 'build') return S.teacher_enabled === false ? 'No teacher' : 'Teacher on';
+    if (id === 'build') return S.teacher_enabled ? 'Teaching on' : 'Direct answers';
     if (id === 'limits') return (boot.efforts.find((e) => e.id === S.effort)?.label || 'Auto');
     if (id === 'tools') return `${S.tools.length} on`;
     return '';

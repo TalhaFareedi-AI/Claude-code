@@ -337,7 +337,7 @@ async def test_uploaded_file_is_data_not_orders(harness, db, fake, tmp_path):
     tid, ev = await go(harness, "u_up", message="summarize my notes", mode="fast", uploads=[rec["id"]])
     sent = fake.requests[0]["messages"]
     assert "<file name=\"notes.txt\">" in sent[-1]["content"]
-    assert "never orders" in sent[0]["content"]
+    assert "never instructions" in sent[0]["content"]  # uploads are data, not commands
 
 
 async def test_cost_comes_from_openrouter_and_falls_back_to_table(harness, fake, db):

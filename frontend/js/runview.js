@@ -2,7 +2,7 @@
 // no secret state, so a reload (replay from the saved events) shows the same steps.
 import { h, $ } from './dom.js';
 import { renderMarkdown } from './markdown.js';
-import { renderChart, renderQuiz, renderSvg } from './charts.js';
+import { renderChart, renderQuiz, renderSvg, renderFlashcards, renderTable } from './charts.js';
 
 const TOOL_NAMES = { calculator: 'Calculator', chart: 'Chart maker', diagram: 'Diagram', ppt_builder: 'PowerPoint builder', doc_builder: 'Word builder', web_search: 'Web search' };
 
@@ -18,6 +18,8 @@ export class ArtifactStore {
       if (a.kind === 'chart') n = renderChart(a.data);
       else if (a.kind === 'quiz') n = renderQuiz(a.data);
       else if (a.kind === 'svg') n = renderSvg(a.data.svg);
+      else if (a.kind === 'flashcards') n = renderFlashcards(a.data);
+      else if (a.kind === 'table') n = renderTable(a.data);
     } catch (e) { console.error('artifact failed', e); n = h('div', { class: 'notice', text: 'This picture could not be drawn.' }); }
     if (n) this.nodes.set(id, n);
     return n;

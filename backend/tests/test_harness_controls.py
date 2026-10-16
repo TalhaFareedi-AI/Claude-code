@@ -28,18 +28,28 @@ def test_json_object_parser_handles_escaped_quotes():
         parse_json('[1,2,3]')
 
 
-async def test_teacher_off_uses_direct_style(harness, fake):
-    _, events = await run(harness, message="Explain gravity", mode="normal", teacher_enabled=False)
+async def test_teaching_is_off_by_default_and_asks_for_no_lesson(harness, fake):
+    """The default is a direct answer: no tutor persona, no forced analogy or check question."""
+    _, events = await run(harness, message="Explain gravity", mode="normal")
     assert events[-1]["status"] == "done"
     prompt = fake.requests[0]["messages"][0]["content"]
-    assert "precise, helpful assistant" in prompt
-    assert "patient tutor" not in prompt
+    assert "Answer the user's actual question" in prompt
+    assert "Do not add analogies, lessons" in prompt
+    for tutor_phrase in ("tutor", "beginner understands", "check question"):
+        assert tutor_phrase not in prompt
     assert not any(e.get("agent") == "teacher" for e in events)
+
+
+async def test_teaching_style_only_after_it_is_turned_on(harness, fake):
+    _, events = await run(harness, message="Explain gravity", mode="normal", teacher_enabled=True)
+    prompt = fake.requests[0]["messages"][0]["content"]
+    assert "asked to be taught" in prompt and "check question" in prompt
+    assert "Do not add analogies, lessons" not in prompt
 
 
 async def test_selected_teacher_runs_once_and_is_billed(harness, db):
     model = "anthropic/claude-haiku-5.5"
-    tid, events = await run(harness, message="Explain gravity", mode="normal", teacher_model=model)
+    tid, events = await run(harness, message="Explain gravity", mode="normal", teacher_enabled=True, teacher_model=model)
     assert events[-1]["status"] == "done"
     assert db.scalar("SELECT COUNT(*) FROM usage_events WHERE task_id=? AND role='teacher'", (tid,)) == 1
     assert wallet.ledger_mismatches(db) == []
@@ -51,7 +61,7 @@ async def test_disabled_teacher_does_not_resolve_unavailable_model(harness):
 
 
 async def test_paid_teacher_cannot_bypass_plan(harness):
-    _, events = await run(harness, message="hello", mode="fast", teacher_model="anthropic/claude-opus-5.5")
+    _, events = await run(harness, message="hello", mode="fast", teacher_enabled=True, teacher_model="anthropic/claude-opus-5.5")
     assert events[-1]["status"] == "error"
     assert any("higher plan" in e.get("text", "") for e in events)
 
@@ -216,11 +226,11 @@ async def test_teacher_cannot_drop_original_code_and_sources(harness, fake, monk
         system = body["messages"][0]["content"]
         if "Rewrite the completed answer" in system:
             return "A shorter answer that accidentally dropped the code and citation."
-        if "patient tutor" in system:
+        if "asked to be taught" in system:
             return answer
         return original(body)
     monkeypatch.setattr(fake, "_reply", reply)
-    _, events = await run(harness, message="Show the code", mode="normal", teacher_model="anthropic/claude-haiku-5.5")
+    _, events = await run(harness, message="Show the code", mode="normal", teacher_enabled=True, teacher_model="anthropic/claude-haiku-5.5")
     final = [e for e in events if e["type"] == "text" and e.get("replace")][-1]["delta"]
     assert final == answer
     assert any(e["type"] == "notice" and "original answer is preserved" in e["text"] for e in events)

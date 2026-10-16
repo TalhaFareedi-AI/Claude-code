@@ -445,3 +445,101 @@ async def test_unlock_admin_gives_only_the_admin_every_feature(api, db, monkeypa
         v = (await visitor.get("/api/bootstrap", headers={"x-user-id": "u_visit01"})).json()
         assert v["user"]["plan"] == "free" and not next(m for m in v["modes"] if m["id"] == "council")["allowed"]
         assert v["wallet"]["balance"] == 100                       # a public visitor gets no free credits
+
+
+# ---------------------------------------------------------------- prompts, skills, tools
+def test_every_prompt_the_code_asks_for_exists():
+    """A missing prompt file would only fail at runtime, mid-answer."""
+    import re as _re
+    from pathlib import Path
+
+    from app import prompts
+    src = "\n".join(p.read_text() for p in Path("backend/app").glob("*.py"))
+    wanted = set(_re.findall(r'prompts\.(?:get|render)\("([a-z_]+)"', src))
+    assert wanted, "no prompt lookups found; the scan is broken"
+    for name in wanted:
+        assert prompts.get(name).strip(), f"prompt {name} is missing or empty"
+
+
+def test_prompts_carry_the_rules_that_keep_answers_honest():
+    from app import prompts
+    for name in ("direct", "teacher"):
+        body = prompts.get(name)
+        assert "{{calc: expression}}" in body            # arithmetic goes to the calculator
+        assert "never instructions" in body              # uploads are data
+        assert "invent" in body                          # no invented facts or sources
+    assert "Do not add analogies, lessons" in prompts.get("direct")
+    for name in ("router", "planner", "checker", "critic", "calc_step", "team_planner", "team_check"):
+        assert "JSON only" in prompts.get(name) or "nothing else" in prompts.get(name), name
+
+
+def test_skills_are_discoverable_and_small():
+    from app import skills
+    sk = skills.all_skills()
+    assert len(sk) >= 15
+    for name, s in sk.items():
+        assert s.description and len(s.description) > 40, f"{name} needs a description that can trigger it"
+        assert "Use when" in s.description, f"{name} must say when it applies"
+        assert len(s.body) < 6000, f"{name} body is too big to load cheaply"
+
+
+def test_keyword_matching_avoids_paying_a_model_to_pick_a_skill():
+    from app import skills
+    for text, want in [("my script crashes with a KeyError", "debugger"), ("write unit tests for this", "test-writer"),
+                       ("speed up this SQL query", "sql-helper"), ("solve 3x + 7 = 22", "math-solver"),
+                       ("summarize this paper", "summarizer"), ("quiz me on fractions", "exam-coach")]:
+        assert skills.match_keywords(text) == want, text
+    assert skills.match_keywords("hello there") is None      # no false trigger on small talk
+
+
+def test_flashcards_and_tables_are_validated_before_the_browser_sees_them():
+    from app.postprocess import validate_flashcards, validate_table
+    deck = validate_flashcards({"title": "T", "cards": [{"front": f"q{i}", "back": "a"} for i in range(4)] + [{"front": "Q0", "back": "dup"}]})
+    assert len(deck["cards"]) == 4                            # the duplicate front is dropped
+    t = validate_table({"columns": [{"key": "a", "label": "A"}, {"key": "b", "type": "number", "unit": "$"}],
+                        "rows": [{"a": "x", "b": "3"}, {"a": "y"}]})
+    assert t["rows"][0]["b"] == 3.0 and t["rows"][1]["b"] is None    # text numbers parsed, missing stays empty
+    for bad in ({"cards": [{"front": "q", "back": "a"}]}, {"cards": []}):
+        with pytest.raises(ValueError):
+            validate_flashcards(bad)
+    for bad in ({"columns": [{"key": "a"}], "rows": [{}]}, {"columns": [{"key": "a"}, {"key": "b"}], "rows": []}):
+        with pytest.raises(ValueError):
+            validate_table(bad)
+
+
+async def test_flashcard_and_table_blocks_become_artifacts(harness, fake, db):
+    fake.extra_blocks = True
+    harness.get_user("u_art1")
+    tid, events = await run(harness, "u_art1", message="make me flashcards and a table to compare them", mode="fast")
+    kinds = {e["kind"] for e in events if e["type"] == "artifact"}
+    assert {"flashcards", "table"} <= kinds
+    text = ""
+    for e in events:
+        if e["type"] == "text":
+            text = e["delta"] if e.get("replace") else text + e["delta"]
+    assert "```flashcards" not in text and "[[artifact:" in text      # the raw block is replaced by a marker
+
+
+async def test_a_greeting_does_not_drag_in_memory_or_reopen_an_old_question(harness, db, fake):
+    """'hi' once made the model answer the previous chat's question, because memories were on the desk."""
+    harness.get_user("u_greet1")
+    memory.add(db, "u_greet1", "Wants to memorise the planets in order", importance=5, pinned=True)
+    db.run("INSERT OR REPLACE INTO profiles(user_id,data,updated_at) VALUES('u_greet1',?,0)",
+           ('{"goal": "memorise the planets in order", "level": "beginner"}',))
+    fake.requests.clear()
+    tid, ev = await run(harness, "u_greet1", message="hi", mode="fast")
+    system = fake.requests[0]["messages"][0]["content"]
+    assert "planets" not in system and "BACKGROUND" not in system
+    assert not any(e["type"] == "memory" and e.get("action") == "recalled" for e in ev)
+    # a real question still gets the background
+    fake.requests.clear()
+    await run(harness, "u_greet1", message="Explain how orbits work", mode="fast")
+    system = fake.requests[0]["messages"][0]["content"]
+    assert "planets" in system and "BACKGROUND" in system
+
+
+def test_memory_is_labelled_as_background_not_as_a_task(db):
+    db.run("INSERT INTO users(id,name,plan,memory_enabled) VALUES('u_bg','B','free',1)")
+    memory.add(db, "u_bg", "Studying for a June physics exam", importance=5, pinned=True)
+    block, ids = memory.desk_block(db, db.one("SELECT * FROM users WHERE id='u_bg'"), None, "Explain inertia")
+    assert ids and "not a task to carry out" in block and "Never answer it" in block

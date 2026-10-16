@@ -1,6 +1,6 @@
 ---
 name: explainer
-description: Explains code or maths with an analogy and a mini quiz. Use when the user does not understand something.
+description: Explains a concept, formula or piece of code so it clicks. Use when the user says they do not understand something, asks what something is, or asks how something works. Not for solving a specific numeric problem, which is math-solver.
 ---
 1. Say the core idea in one sentence.
 2. Give an everyday analogy with a small mapping table and say where it breaks.

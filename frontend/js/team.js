@@ -154,10 +154,11 @@ export function buildTeamSettings(boot, S, { onChange, brainSelect }) {
         field('Most credits the whole team may use', number('Team credit cap', team.max_credits, 1, 2000, (v) => update((t) => { t.max_credits = v; }))))),
       h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Builder, checker and finisher' }), h('div', { class: 'team-roles' },
         roleCard('builder', 'Builder', team.builder), roleCard('checker', 'Checker', team.checker), roleCard('finisher', 'Finisher', team.finisher))),
-      h('div', { class: 'team-block team-teacher' }, h('b', { class: 'small', text: 'Teacher' }),
-        toggle('Use a teacher model for the final explanation', S.teacher_enabled !== false, (enabled) => { S.teacher_enabled = enabled; onChange(); render(); }),
-        S.teacher_enabled !== false ? field('Teacher model', brainSelect(boot, S.teacher_model, (model) => { S.teacher_model = model || null; onChange(); }, { label: 'Teacher model' })) : null,
-        h('p', { class: 'muted tiny', text: 'Auto applies a teaching style to the answer. Choosing a teacher model adds a separate explanation pass and updates the estimate. Turn this off for a direct answer.' })));
+      h('div', { class: 'team-block team-teacher' }, h('b', { class: 'small', text: 'Teaching mode' }),
+        h('p', { class: 'muted small', text: 'Off (default): you get a direct answer at your own level, with no lesson, analogy or check question. On: the answer is explained like a tutor would, for a beginner.' }),
+        toggle('Explain answers like a tutor (treat me as a learner)', S.teacher_enabled === true, (enabled) => { S.teacher_enabled = enabled; onChange(); render(); }),
+        S.teacher_enabled === true ? field('Teacher model (optional: a separate explaining pass)', brainSelect(boot, S.teacher_model, (model) => { S.teacher_model = model || null; onChange(); }, { label: 'Teacher model' })) : null,
+        S.teacher_enabled === true ? h('p', { class: 'muted tiny', text: 'Leave the model on Auto to apply the teaching style inside the same answer. Choosing a model adds a separate explanation pass, which costs extra and shows in the estimate.' }) : null));
     for (const r of roots) for (const summary of r.querySelectorAll('details > summary')) if (expanded.has(summary.textContent)) summary.parentElement.open = true;
     if (focused) roots.flatMap((r) => [...r.querySelectorAll('[aria-label]')]).find((el) => el.getAttribute('aria-label') === focused)?.focus();
   }

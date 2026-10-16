@@ -55,11 +55,16 @@ const ok = []; const check = (n, v, x = '') => { ok.push(v); console.log(`${v ? 
 
   // a real run in a mode that is Pro-only on normal plans
   await p.fill('#composer-text', 'explain gravity'); await p.click('#send-btn');
-  await p.waitForSelector('.msg-foot', { timeout: 20000 }).catch(() => {});
-  const ask = await p.locator('.ask button:has-text("Continue")').count();
-  if (ask) await p.locator('.ask button:has-text("Continue")').click();
-  await p.waitForSelector('.msg-foot', { timeout: 20000 });
-  check('a Council run works for the owner', /agree/i.test(await p.locator('.msg.assistant .answer').last().innerText()));
+  const cont = p.locator('.ask button:has-text("Continue")');
+  await Promise.race([cont.waitFor({ state: 'visible', timeout: 20000 }).catch(() => {}),
+                      p.waitForSelector('.msg.assistant .answer', { timeout: 20000 }).catch(() => {})]);
+  if (await cont.count()) await cont.first().click();
+  await p.waitForFunction(() => {
+    const a = [...document.querySelectorAll('.msg.assistant .answer')].pop();
+    return a && a.innerText.trim().length > 5 && !document.querySelector('.run.working');
+  }, null, { timeout: 25000 });
+  const councilText = await p.locator('.msg.assistant .answer').last().innerText().catch(() => '(no answer element)');
+  check('a Council run works for the owner', /agree/i.test(councilText), councilText.slice(0, 120).replace(/\n/g, ' '));
 
   // phone
   const m = await (await b.newContext({ viewport: { width: 390, height: 780 }, isMobile: true, hasTouch: true })).newPage();

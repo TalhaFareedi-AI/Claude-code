@@ -395,3 +395,17 @@ body.resizing { cursor: col-resize; user-select: none; } body.resizing * { point
 .files-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .files-head > div { flex: 1; min-width: 0; }
 .files-head .icon-btn { margin: -6px -6px 0 0; font-size: 1.15rem; border: 1px solid var(--line); border-radius: 50%; min-width: 36px; min-height: 36px; }
+
+/* ---------- flashcards and tables ---------- */
+.flashcards .card-face { border: 1px solid var(--line); border-radius: var(--r); background: var(--panel); padding: var(--s5) var(--s4); min-height: 120px; display: grid; place-items: center; text-align: center; cursor: pointer; margin-bottom: var(--s3); }
+.flashcards .card-side { font-size: 1.1rem; font-weight: 600; overflow-wrap: anywhere; }
+.flashcards .card-side.back { font-weight: 400; color: var(--accent); }
+.flashcards .btn-row { margin-top: var(--s2); align-items: center; }
+.table-art .tbl-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r-sm); }
+table.data-table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+.data-table th, .data-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left; }
+.data-table th { background: var(--panel-2); padding: 0; }
+.data-table td.num, .data-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.th-sort { width: 100%; background: none; border: 0; padding: 7px 10px; text-align: inherit; font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.th-sort:hover { color: var(--ink); }
+.data-table tbody tr:hover { background: var(--panel-2); }

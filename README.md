@@ -149,3 +149,6 @@ Browser checks: `node scripts/layout_ui_check.cjs` (24, start the server with `U
 
 ## Deploy
 See [DEPLOY.md](DEPLOY.md): Dockerfile, docker-compose.yml and a Render blueprint (render.yaml) are included. Use `UNLOCK_ALL=admin` on a public site.
+
+## Prompts, skills and tools
+See [docs/prompting.md](docs/prompting.md). Teaching mode is off by default: you get a direct answer unless you turn it on in Settings. Run `python scripts/token_report.py` to see what every prompt costs.

@@ -34,17 +34,17 @@ const check = (name, ok) => { assert.ok(ok, name); results.push(name); console.l
     await page.locator('.team-instance summary').filter({ hasText: 'Researcher 3 limits' }).click();
     await page.getByLabel('Researcher 3 search engine', { exact: true }).selectOption('exa');
     await page.getByLabel('Researcher 3 search limit', { exact: true }).fill('3'); await page.getByLabel('Researcher 3 search limit', { exact: true }).blur();
-    await page.click('#tab-build-btn'); await page.getByLabel('Use a teacher model for the final explanation', { exact: true }).uncheck();
+    await page.click('#tab-build-btn'); await page.getByLabel('Explain answers like a tutor (treat me as a learner)', { exact: true }).check();   // teaching is opt-in
     await page.click('#tab-planning-btn'); await page.getByLabel('Team profile name', { exact: true }).fill('Research profile');
     await page.getByRole('button', { name: 'Save profile', exact: true }).click();
     check('Named profiles preserve positional model choices and teacher preference', await page.evaluate(() => {
       const settings = JSON.parse(localStorage.getItem('sh.settings'));
-      return settings.team.planners.models[0] && settings.team.planners.models[2] && settings.team.planners.agents[2].effort === 'high' && settings.team.planners.agents[2].max_credits === 8 && settings.team.researchers.agents[2].engine === 'exa' && settings.team.researchers.agents[2].max_searches_each === 3 && settings.teacher_enabled === false && settings.team.name === 'Research profile';
+      return settings.team.planners.models[0] && settings.team.planners.models[2] && settings.team.planners.agents[2].effort === 'high' && settings.team.planners.agents[2].max_credits === 8 && settings.team.researchers.agents[2].engine === 'exa' && settings.team.researchers.agents[2].max_searches_each === 3 && settings.teacher_enabled === true && settings.team.name === 'Research profile';
     }));
     await page.locator('[aria-label="Team preset"] button:has-text("Fast")').click();
     await page.getByLabel('Saved team profile', { exact: true }).selectOption('Research profile');
     const reloaded3 = await page.getByLabel('Number of planners', { exact: true }).inputValue(); await page.click('#tab-build-btn');
-    check('Loading a profile restores all its controls', reloaded3 === '3' && !await page.getByLabel('Use a teacher model for the final explanation', { exact: true }).isChecked());
+    check('Loading a profile restores all its controls', reloaded3 === '3' && await page.getByLabel('Explain answers like a tutor (treat me as a learner)', { exact: true }).isChecked());
     await page.click('#tab-planning-btn');
     await page.locator('[aria-label="Team preset"] button:has-text("Balanced")').click();
     await page.getByLabel('Number of planners', { exact: true }).fill('2'); await page.getByLabel('Number of planners', { exact: true }).blur();
@@ -71,14 +71,14 @@ const check = (name, ok) => { assert.ok(ok, name); results.push(name); console.l
     await approve.click();
     await page.waitForFunction(() => !document.querySelector('.run.working') && document.querySelector('.answer'), null, { timeout: 25000 });
     const approval = requests.find((r) => r.approved_plan);
-    check('Approval resumes the original task with edited goals and a new request identity', approval?.continue_task === originalTask && approval.approved_plan[0].goal.startsWith('Calculate compound') && approval.confirm && approval.request_id !== requests[0].request_id && approval.teacher_enabled === false && approval.max_credits > 0);
+    check('Approval resumes the original task with edited goals and a new request identity', approval?.continue_task === originalTask && approval.approved_plan[0].goal.startsWith('Calculate compound') && approval.confirm && approval.request_id !== requests[0].request_id && approval.teacher_enabled === true && approval.max_credits > 0);
     const chatA = await page.evaluate(() => JSON.parse(localStorage.getItem('sh.conv')));
     await page.reload(); await page.waitForSelector('.answer'); await page.click('.chip:has-text("Team:")');
     const mode_ = await page.getByLabel('Plan mode', { exact: true }).inputValue(); await page.click('#tab-build-btn');
-    check('Conversation reload restores team and optional teacher settings', mode_ === 'ask' && !await page.getByLabel('Use a teacher model for the final explanation', { exact: true }).isChecked());
+    check('Conversation reload restores team and optional teacher settings', mode_ === 'ask' && await page.getByLabel('Explain answers like a tutor (treat me as a learner)', { exact: true }).isChecked());
     await page.click('#settings-close'); await page.click('#new-chat'); await page.click('.chip:has-text("Team:")');
     await page.locator('[aria-label="Team preset"] button:has-text("Fast")').click();
-    await page.click('#tab-build-btn'); await page.getByLabel('Use a teacher model for the final explanation', { exact: true }).check();
+    await page.click('#tab-build-btn'); await page.getByLabel('Explain answers like a tutor (treat me as a learner)', { exact: true }).uncheck();   // this chat wants direct answers
     await page.click('#settings-close');
     let truncated = false;
     await page.route('**/api/chat', async (route) => {
@@ -116,7 +116,7 @@ const check = (name, ok) => { assert.ok(ok, name); results.push(name); console.l
     await page.evaluate((id) => { localStorage.setItem('sh.conv', JSON.stringify(id)); }, chatA);
     await page.reload(); await page.waitForSelector('.answer'); await page.click('.chip:has-text("Team:")');
     const mode2_ = await page.getByLabel('Plan mode', { exact: true }).inputValue(); await page.click('#tab-build-btn');
-    check('Each chat keeps its own team selection', mode2_ === 'ask' && !await page.getByLabel('Use a teacher model for the final explanation', { exact: true }).isChecked());
+    check('Each chat keeps its own team selection', mode2_ === 'ask' && await page.getByLabel('Explain answers like a tutor (treat me as a learner)', { exact: true }).isChecked());
     await page.click('#settings-close');
     const mobile = await browser.newContext({ viewport: { width: 390, height: 780 }, isMobile: true, hasTouch: true });
     const phone = await mobile.newPage(); phone.on('pageerror', (e) => errors.push(e.message));

@@ -153,7 +153,10 @@ async def test_bootstrap_lists_modes_models_efforts_for_plan(client):
     assert {"overthink", "council", "think_team"} <= free_locked
     assert {e["id"]: e["allowed"] for e in b["efforts"]}["max"] is False
     assert any(m["lab"] == "DeepSeek" and m["region"] == "china" for m in b["models"])
-    assert b["wallet"]["balance"] == 100 and len(b["skills"]) == 7
+    assert b["wallet"]["balance"] == 100
+    names = {s["name"] for s in b["skills"]}
+    assert {"architect", "coder", "debugger", "math-solver", "researcher"} <= names
+    assert all(s["description"] for s in b["skills"])      # the description is what makes a skill trigger
 
 
 async def test_estimate_endpoint_is_live(client):

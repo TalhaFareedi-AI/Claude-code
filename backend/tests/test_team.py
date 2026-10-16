@@ -29,7 +29,7 @@ def reply_with_plan(fake, monkeypatch, steps=None):
     original = fake._reply
     def reply(body):
         system = body["messages"][0]["content"]
-        if "You are the planner" in system:
+        if "bounded agent team" in system:
             return json.dumps({"steps": steps or short_plan()})
         return original(body)
     monkeypatch.setattr(fake, "_reply", reply)
@@ -289,7 +289,7 @@ async def test_planner_repairs_valid_json_with_invalid_step_schema(harness, db, 
     planning_calls = 0
     def reply(body):
         nonlocal planning_calls
-        if "You are the planner" in body["messages"][0]["content"]:
+        if "bounded agent team" in body["messages"][0]["content"]:
             planning_calls += 1
             return json.dumps(invalid if planning_calls == 1 else {"steps": short_plan()})
         return original(body)
@@ -306,7 +306,7 @@ async def test_planner_semantic_repairs_are_bounded(harness, db, fake, monkeypat
     planning_calls = 0
     def reply(body):
         nonlocal planning_calls
-        if "You are the planner" in body["messages"][0]["content"]:
+        if "bounded agent team" in body["messages"][0]["content"]:
             planning_calls += 1
             return json.dumps({"steps": []})
         return original(body)

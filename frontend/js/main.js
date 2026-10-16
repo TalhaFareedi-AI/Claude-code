@@ -20,10 +20,10 @@ const files = new FilesPanel();
 const thread = $('#thread'), wrap = $('#thread-wrap'), input = $('#composer-text');
 
 const STARTERS = [
-  { t: 'Explain it simply', d: 'How does photosynthesis work? Use an everyday example.' },
+  { t: 'Ask anything', d: 'Explain how HTTPS actually keeps a request private.' },
   { t: 'Play with a graph', d: 'Show me how savings grow with a chart and sliders.' },
   { t: 'Make a deck', d: 'Make a 6 slides PPT on the water cycle.' },
-  { t: 'Quiz me', d: 'Quiz me on adding fractions.' },
+  { t: 'Work through a problem', d: 'Plan and compare two ways to save $100 a month for a year.' },
 ];
 
 // ------------------------------------------------------------------ boot
@@ -118,8 +118,8 @@ function newChat() {
 }
 
 function showWelcome() {
-  thread.replaceChildren(h('div', { class: 'welcome' }, h('h2', { text: 'What do you want to learn today?' }),
-    h('p', { class: 'muted', text: 'I explain in simple words, with examples. Charts have sliders you can move.' }),
+  thread.replaceChildren(h('div', { class: 'welcome' }, h('h2', { text: 'What can I work on?' }),
+    h('p', { class: 'muted', text: 'Direct answers by default. Turn on Teaching mode in Settings if you want everything explained like a tutor.' }),
     h('div', { class: 'starters' }, STARTERS.map((s) => h('button', { type: 'button', class: 'starter', onclick: () => send({ message: s.d }) }, h('b', { text: s.t }), h('span', { class: 'muted small', text: s.d }))))));
 }
 

@@ -19,6 +19,15 @@ RECIPE = {"chart": "line", "title": "How savings grow",
 SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 360"><rect x="10" y="10" width="100" height="50" fill="none" stroke="black"/><text x="20" y="40">Sun</text><script>alert(1)</script></svg>'
 
 
+def as_text(content) -> str:
+    """A cached system prompt arrives as a list of blocks, so flatten it before matching."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return ""
+
+
 class FakeOpenRouter:
     def __init__(self):
         self.requests: list[dict] = []
@@ -28,6 +37,7 @@ class FakeOpenRouter:
         self.critic_calls = 0
         self.cost_mult = 1.0                    # make calls cost more, to hit the credit caps
         self.delay = 0.0                        # seconds per call, to watch animations
+        self.extra_blocks = False               # emit flashcard and table blocks in the default answer
         self.memory_add = False                 # let the memory model propose a new memory
         self.no_cost = False                    # drop usage.cost to test the table fallback
         self.app = self._build()
@@ -42,28 +52,28 @@ class FakeOpenRouter:
     # ---- content by role (decided from the system prompt) -------------------------------------------------
     def _reply(self, body: dict) -> str:
         msgs = body["messages"]
-        sys = msgs[0]["content"] if msgs and msgs[0]["role"] == "system" else ""
-        user = msgs[-1]["content"] if msgs else ""
-        everything = " ".join(m["content"] for m in msgs if isinstance(m["content"], str))
-        if "You route messages" in sys:
+        sys = as_text(msgs[0]["content"]) if msgs and msgs[0]["role"] == "system" else ""
+        user = as_text(msgs[-1]["content"]) if msgs else ""
+        everything = " ".join(as_text(m["content"]) for m in msgs)
+        if "task router" in sys:
             return json.dumps({"intent": "teach", "needs": [], "complexity": "medium", "make_plan": False})
-        if "You understand and clarify" in sys:
+        if "Restate a user's task precisely" in sys:
             return json.dumps({"goal": user[:400], "enhanced_prompt": user[:1000], "constraints": [],
                                "missing": [], "research": False, "files": False, "queries": []})
-        if "You are the planner" in sys:
+        if "shortest plan" in sys or "bounded agent team" in sys:   # the mode planner and the team planner
             return json.dumps({"steps": [
                 {"title": "Work out the numbers", "kind": "calculate", "detail": "compute"},
                 {"title": "Draw a chart", "kind": "chart", "detail": "chart"},
                 {"title": "Write the answer", "kind": "answer", "detail": "final"}]})
-        if "List the calculations" in sys:
+        if "List every calculation" in sys:
             return json.dumps({"calcs": [{"label": "Money after 2 years", "expr": "1000*(1+5/100)^2"}]})
         if "Reply with the JSON recipe only" in sys:
             return json.dumps(RECIPE)
         if "Reply with the SVG only" in sys:
             return SVG
-        if "strict checker" in sys:
+        if "check an answer before the user sees it" in sys or "strict checker for one step" in sys:
             return json.dumps({"ok": True, "problem": "", "fix": ""})
-        if "You mark answers" in sys:
+        if "Score an answer" in sys:
             s = self.critic_scores[min(self.critic_calls, len(self.critic_scores) - 1)]
             self.critic_calls += 1
             return json.dumps({"score": s, "problems": ["Too long", "Add an example"] if s < 8 else []})
@@ -71,7 +81,7 @@ class FakeOpenRouter:
             return "Simple idea (rewritten): a seed grows into a plant.\n\n[[next: Explain simpler | Quiz me]]"
         if "the thinking half" in sys:
             return json.dumps({"plan": "p", "facts": ["f"], "steps": ["s"], "result": "42", "doubts": []})
-        if "You are the judge" in sys:
+        if "independent answers to the same question" in sys:
             return "Both answers agree.\n\nWhere they agreed and disagreed: they agree.\n\n[[next: Explain simpler | Quiz me | Show a graph]]"
         if "Notes from" in sys:
             return "Final answer from the notes: 42.\n\n[[next: Explain simpler | Quiz me]]"
@@ -124,6 +134,9 @@ class FakeOpenRouter:
             text += '```quiz\n{"questions":[{"q":"What do plants eat?","options":["Light","Rocks"],"answer":0,"why":"They use sunlight."}]}\n```\n\n'
         if "diagram" in low and "svg" in sys:
             text += "```svg\n" + SVG + "\n```\n\n"
+        if self.extra_blocks:
+            text += '```flashcards\n{"title":"Deck","cards":[{"front":"Q1","back":"A1"},{"front":"Q2","back":"A2"},{"front":"Q3","back":"A3"}]}\n```\n\n'
+            text += '```table\n{"title":"Compare","columns":[{"key":"n","label":"Name"},{"key":"v","label":"Value","type":"number"}],"rows":[{"n":"a","v":1},{"n":"b","v":2}]}\n```\n\n'
         text += "Check question: where does a plant get its energy?\n\n[[next: Explain simpler | Quiz me | Show a graph]]"
         return text
 

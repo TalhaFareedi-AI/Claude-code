@@ -239,3 +239,77 @@ export function renderSvg(svgText) {
   const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);   // an <img> never runs scripts
   return h('div', { class: 'art svg-art' }, h('img', { src: url, alt: 'Diagram made by the assistant', loading: 'lazy' }));
 }
+
+// Flashcards: flip, step and shuffle entirely in the browser. Reviewing a deck costs 0 tokens.
+export function renderFlashcards(deck) {
+  let order = deck.cards.map((_, i) => i), at = 0, shown = false;
+  const known = new Set();
+  const face = h('div', { class: 'card-face' });
+  const counter = h('span', { class: 'muted small' });
+  const score = h('span', { class: 'muted small' });
+  const hintBtn = h('button', { type: 'button', class: 'btn small', text: 'Hint' });
+  const flip = h('button', { type: 'button', class: 'btn primary', text: 'Show answer' });
+
+  function paint() {
+    const c = deck.cards[order[at]];
+    face.replaceChildren(h('div', { class: 'card-side' + (shown ? ' back' : ''), text: shown ? c.back : c.front }));
+    counter.textContent = `${at + 1} of ${deck.cards.length}`;
+    score.textContent = known.size ? `${known.size} marked known` : '';
+    flip.textContent = shown ? 'Show question' : 'Show answer';
+    hintBtn.hidden = shown || !c.hint;
+  }
+  const step = (d) => { at = (at + d + deck.cards.length) % deck.cards.length; shown = false; paint(); };
+  flip.addEventListener('click', () => { shown = !shown; paint(); });
+  hintBtn.addEventListener('click', () => { const c = deck.cards[order[at]]; if (c.hint) face.append(h('div', { class: 'muted small', text: 'Hint: ' + c.hint })); hintBtn.hidden = true; });
+  face.addEventListener('click', () => { shown = !shown; paint(); });
+
+  const root = h('div', { class: 'art flashcards' }, h('h3', { text: deck.title }),
+    face,
+    h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn small', text: '← Back', onclick: () => step(-1) }),
+      flip, hintBtn,
+      h('button', { type: 'button', class: 'btn small', text: 'Next →', onclick: () => step(1) })),
+    h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn small', text: '✓ I knew it', onclick: () => { known.add(order[at]); step(1); } }),
+      h('button', { type: 'button', class: 'btn small', text: '🔀 Shuffle', onclick: () => { order = order.map((v) => [Math.random(), v]).sort((a, b) => a[0] - b[0]).map((p) => p[1]); at = 0; shown = false; paint(); } }),
+      counter, score));
+  paint();
+  return root;
+}
+
+// Sortable table. Clicking a header re-sorts in the browser, so it costs no tokens.
+export function renderTable(t) {
+  let sortKey = null, asc = true;
+  const body = h('tbody');
+  const cell = (col, row) => {
+    const v = row[col.key];
+    if (col.type === 'number') return v == null ? '–' : (col.unit ? `${col.unit}${fmtNum(v)}` : fmtNum(v));
+    return String(v ?? '');
+  };
+  function paint() {
+    const rows = [...t.rows];
+    if (sortKey) {
+      const col = t.columns.find((c) => c.key === sortKey);
+      rows.sort((a, b) => {
+        const x = a[sortKey], y = b[sortKey];
+        if (col.type === 'number') return ((x ?? -Infinity) - (y ?? -Infinity)) * (asc ? 1 : -1);
+        return String(x).localeCompare(String(y), undefined, { numeric: true }) * (asc ? 1 : -1);
+      });
+    }
+    body.replaceChildren(...rows.map((r) => h('tr', null, t.columns.map((c) => h('td', { class: c.type === 'number' ? 'num' : '', text: cell(c, r) })))));
+  }
+  const head = h('tr', null, t.columns.map((c) => {
+    const btn = h('button', { type: 'button', class: 'th-sort', 'aria-label': `Sort by ${c.label}` }, c.label, h('span', { class: 'arrow' }));
+    btn.addEventListener('click', () => {
+      asc = sortKey === c.key ? !asc : true; sortKey = c.key;
+      head.querySelectorAll('.arrow').forEach((a) => { a.textContent = ''; });
+      btn.querySelector('.arrow').textContent = asc ? ' ▲' : ' ▼';
+      paint();
+    });
+    return h('th', { class: c.type === 'number' ? 'num' : '' }, btn);
+  }));
+  paint();
+  return h('div', { class: 'art table-art' }, h('h3', { text: t.title }),
+    h('div', { class: 'tbl-scroll' }, h('table', { class: 'data-table' }, h('thead', null, head), body)),
+    h('p', { class: 'muted tiny', text: 'Click a column heading to sort.' }));
+}

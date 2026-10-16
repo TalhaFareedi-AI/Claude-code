@@ -31,6 +31,8 @@ TOOLS = [
     {"id": "diagram", "label": "Diagrams", "default": True},
     {"id": "documents", "label": "Word documents", "default": True},
     {"id": "ppt", "label": "PowerPoint", "default": True},
+    {"id": "flashcards", "label": "Flashcards", "default": True},
+    {"id": "table", "label": "Sortable tables", "default": True},
     {"id": "web", "label": "Web search", "default": True},
 ]
 EFFORTS = [{"id": "auto", "label": "Auto"}, {"id": "off", "label": "Off"}, {"id": "low", "label": "Low"},
@@ -47,7 +49,7 @@ class ChatBody(BaseModel):
     mode: str = "auto"
     brains: dict = Field(default_factory=dict)
     team: dict = Field(default_factory=dict)
-    teacher_enabled: bool = True
+    teacher_enabled: bool = False
     teacher_model: str | None = Field(None, max_length=200)
     approved_plan: list[dict] | None = Field(None, max_length=12)
     effort: str = "auto"
