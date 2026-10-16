@@ -409,3 +409,19 @@ table.data-table { border-collapse: collapse; width: 100%; font-size: .9rem; }
 .th-sort { width: 100%; background: none; border: 0; padding: 7px 10px; text-align: inherit; font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .th-sort:hover { color: var(--ink); }
 .data-table tbody tr:hover { background: var(--panel-2); }
+
+/* ---------- documents and decks ---------- */
+.doc-art { padding: 0; overflow: hidden; }
+.doc-head { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s4); background: var(--panel-2); border-bottom: 1px solid var(--line); }
+.doc-ico { font-size: 1.5rem; } .doc-meta { flex: 1; display: grid; min-width: 0; } .doc-meta b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-preview { padding: var(--s3) var(--s4) 0; max-height: 220px; overflow: hidden; position: relative; -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent); mask-image: linear-gradient(to bottom, #000 60%, transparent); }
+.doc-more { width: 100%; border: 0; border-top: 1px solid var(--line); background: var(--panel); padding: 10px; color: var(--accent); font-weight: 600; }
+.doc-more:hover { background: var(--accent-soft); }
+.doc-read { font-size: .95rem; } .doc-read h1 { font-size: 1.2rem; } .doc-read h2 { font-size: 1.05rem; }
+.slide-page { border: 1px solid var(--line); border-radius: var(--r-sm); padding: var(--s3); margin-bottom: var(--s2); background: var(--panel); }
+.file .acts .danger-ghost { color: var(--bad); }
+
+.image-art { padding: 0; overflow: hidden; }
+.image-art img { width: 100%; height: auto; display: block; background: var(--panel-2); min-height: 80px; }
+.img-foot { display: flex; align-items: center; gap: var(--s2); padding: 8px var(--s3); border-top: 1px solid var(--line); }
+.img-foot .muted { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

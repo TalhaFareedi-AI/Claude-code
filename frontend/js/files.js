@@ -2,14 +2,16 @@
 import { h, $, toast } from './dom.js';
 import { api } from './api.js';
 import { renderSvg } from './charts.js';
+import { renderMarkdown } from './markdown.js';
 
-const ICON = { pptx: '📊', docx: '📝', svg: '🖼️', pdf: '📕', txt: '📄' };
+const ICON = { pptx: '📊', docx: '📝', svg: '🖼️', pdf: '📕', txt: '📄', doc: '📄', slides: '📊', md: '📄', png: '🖼️', jpg: '🖼️' };
 const size = (n) => (n > 1073741824 ? `${(n / 1073741824).toFixed(1)} GB` : n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n > 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
 
 export class FilesPanel {
   constructor() { this.list = $('#file-list'); this.empty = $('#files-empty'); this.preview = $('#preview'); this.count = $('#files-count'); this.refreshSeq = 0; this.previewSeq = 0; }
 
   async refresh(convId) {
+    this.convId = convId;
     const seq = ++this.refreshSeq;
     if (this.convId !== convId) { this.convId = convId; this.previewSeq++; this.preview.hidden = true; }
     try {
@@ -30,7 +32,18 @@ export class FilesPanel {
       h('div', null, h('div', { class: 'name', text: f.name }), h('div', { class: 'meta', text: `${f.kind.toUpperCase()} · ${size(f.size)}${f.version > 1 ? ` · version ${f.version}` : ''}` })),
       h('div', { class: 'acts' },
         h('button', { type: 'button', class: 'btn small', text: 'Open', onclick: () => this.open(f) }),
-        h('button', { type: 'button', class: 'btn small', text: 'Download', onclick: () => this.download(f) })))));
+        h('button', { type: 'button', class: 'btn small', text: 'Download', onclick: () => this.download(f) }),
+        h('button', { type: 'button', class: 'btn small danger-ghost', title: 'Delete this file for good', 'aria-label': `Delete ${f.name}`, text: '🗑', onclick: () => this.remove(f) })))));
+  }
+
+  async remove(f) {
+    if (!confirm(`Delete ${f.name}? This cannot be undone.`)) return;
+    try {
+      await api(`/api/files/${f.id}`, { method: 'DELETE' });
+      this.preview.hidden = true;
+      await this.refresh(this.convId);
+      toast(`Deleted ${f.name}`);
+    } catch (e) { toast(e.message); }
   }
 
   async open(f) {
@@ -40,6 +53,10 @@ export class FilesPanel {
       if (seq !== this.previewSeq) return;
       this.preview.hidden = false;
       if (p.kind === 'svg') this.preview.replaceChildren(h('h3', { text: f.name }), renderSvg(p.svg));
+      else if (p.kind === 'slides') this.preview.replaceChildren(h('h3', { text: p.title || f.name }),
+        ...p.markdown.split(/^---[ \t]*$/m).filter((s) => s.trim()).map((s, i) =>
+          h('div', { class: 'slide-page' }, h('span', { class: 'muted tiny', text: `Slide ${i + 1}` }), renderMarkdown(s.trim()))));
+      else if (p.markdown) this.preview.replaceChildren(h('div', { class: 'doc-read' }, renderMarkdown(p.markdown)));
       else if (p.items) this.preview.replaceChildren(h('h3', { text: p.title || f.name }), ...p.items.map((it, k) => h('div', { class: 'slide' }, h('b', { text: `${k + 1}. ${it.title || ''}` }), it.lines?.length ? h('ul', null, it.lines.map((l) => h('li', { text: String(l) }))) : null)));
       else this.preview.replaceChildren(h('p', { class: 'muted', text: p.note || 'No preview. Use Download.' }));
       this.preview.scrollIntoView({ block: 'nearest' });

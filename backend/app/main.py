@@ -32,6 +32,7 @@ TOOLS = [
     {"id": "documents", "label": "Word documents", "default": True},
     {"id": "ppt", "label": "PowerPoint", "default": True},
     {"id": "flashcards", "label": "Flashcards", "default": True},
+    {"id": "images", "label": "Generated images", "default": False},
     {"id": "table", "label": "Sortable tables", "default": True},
     {"id": "web", "label": "Web search", "default": True},
 ]
@@ -50,6 +51,8 @@ class ChatBody(BaseModel):
     brains: dict = Field(default_factory=dict)
     team: dict = Field(default_factory=dict)
     teacher_enabled: bool = False
+    length: str = Field("auto", pattern=r"^(auto|short|medium|long)$")
+    image_model: str | None = Field(None, max_length=200)
     teacher_model: str | None = Field(None, max_length=200)
     approved_plan: list[dict] | None = Field(None, max_length=12)
     effort: str = "auto"
@@ -206,7 +209,12 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
             "modes": plan_modes(user),
             "models": models,
             "efforts": efforts,
+            "lengths": [{"id": "auto", "label": "Auto"}, {"id": "short", "label": "Short"},
+                        {"id": "medium", "label": "Normal"}, {"id": "long", "label": "Long"}],
             "tools": TOOLS,
+            "image_models": [{"id": m["id"], "name": m["name"], "lab": m["lab"], "price_out": m["price_out"]}
+                             for m in catalog.image_models(db)],
+            "image_model": user.get("image_model"),
             "skills": [{"name": s.name, "description": s.description} for s in skills.all_skills().values()],
             "roles": ROLE_LABELS,
             "dev_mode": settings.dev_mode,
@@ -244,7 +252,7 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
                           skills=b.skills, intent=b.intent, conversation_id=b.conversation_id, confirm=b.confirm,
                           continue_task=b.continue_task, extra_credits=b.extra_credits, private_route=b.private_route,
                           target_message=b.target_message, uploads=b.uploads, team=b.team,
-                          teacher_enabled=b.teacher_enabled, teacher_model=b.teacher_model, approved_plan=b.approved_plan,
+                          teacher_enabled=b.teacher_enabled, teacher_model=b.teacher_model, approved_plan=b.approved_plan, length=b.length, image_model=b.image_model,
                           request_id=b.request_id)
 
     # ---- chat: a stream of small events -----------------------------------------------------------------
@@ -404,6 +412,9 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
                     "items": [{"title": x.get("title") or x.get("heading"), "lines": (x.get("bullets") or x.get("paragraphs") or [])[:6]} for x in items]}
         if r["kind"] == "svg":
             return {"kind": "svg", "svg": workspace.path_of(r).read_text()}
+        if r["kind"] in ("doc", "slides", "md"):
+            return {"kind": r["kind"], "title": Path(r["name"]).stem.replace("-", " ").title(),
+                    "markdown": workspace.path_of(r).read_text()[:200_000]}
         return {"kind": r["kind"], "note": "Download to open this file."}
 
     @app.put("/api/upload")
@@ -427,6 +438,21 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         p.write_bytes(data)
         rec = workspace.register(db, user["id"], "uploads", p, ext.lstrip("."), user["plan"])
         return {"id": rec["id"], "name": clean, "size": rec["size"]}
+
+    @app.delete("/api/files/{fid}")
+    def delete_file(request: Request, fid: str):
+        """Delete one file for good: the bytes, and the row that says this user owns it."""
+        user = who(request)
+        r = own_file(user, fid)
+        try:
+            workspace.path_of(r).unlink(missing_ok=True)
+        except workspace.PathEscape:
+            pass
+        db.run("DELETE FROM workspace_files WHERE id=? AND user_id=?", (fid, user["id"]))
+        db.run("DELETE FROM artifacts WHERE user_id=? AND kind IN ('doc','slides') AND data LIKE ?",
+               (user["id"], f'%"file_id": "{fid}"%'))
+        activity.log(db, user["id"], "file_deleted", file=r["name"], file_kind=r["kind"])
+        return {"ok": True, "used_bytes": workspace.usage_bytes(db, user["id"])}
 
     @app.delete("/api/workspace")
     def delete_workspace(request: Request):
@@ -476,6 +502,11 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
             db.run("UPDATE users SET private_route=? WHERE id=?", (1 if data["private_route"] else 0, user["id"]))
         if "name" in data:
             db.run("UPDATE users SET name=? WHERE id=?", (str(data["name"])[:40] or "Student", user["id"]))
+        if "image_model" in data:
+            wanted = data["image_model"] or None
+            if wanted and not any(m["id"] == wanted for m in catalog.image_models(db)):
+                raise HTTPException(400, "That model cannot generate images.")
+            db.run("UPDATE users SET image_model=? WHERE id=?", (wanted, user["id"]))
         return {"ok": True}
 
     # ---- dev + admin ---------------------------------------------------------------------------------------------------------------------------

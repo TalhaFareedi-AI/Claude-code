@@ -284,7 +284,7 @@ async def test_docx_builds(harness, fake, db, tmp_path):
     harness.get_user("u_doc")
     db.run("UPDATE users SET plan='student' WHERE id='u_doc'")
     topup(db, "u_doc")
-    tid, ev = await go(harness, "u_doc", message="Write a document about the water cycle with 5 sections", mode="auto", confirm=True)
+    tid, ev = await go(harness, "u_doc", message="Write a Word document (docx) about the water cycle with 5 sections", mode="auto", confirm=True)
     assert last(ev, "file_created")["file"]["name"].endswith(".docx")
     from docx import Document
     path = next((tmp_path / "ws" / "u_doc").glob("t_*/out/*.docx"))

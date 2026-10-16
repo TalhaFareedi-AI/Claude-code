@@ -37,6 +37,11 @@ class FakeOpenRouter:
         self.critic_calls = 0
         self.cost_mult = 1.0                    # make calls cost more, to hit the credit caps
         self.delay = 0.0                        # seconds per call, to watch animations
+        self.image_block = False                # answer asks for a generated picture
+        self.returns_image = False              # the image model returns a real PNG
+        self.doc_block = False                  # answer with a saved document
+        self.slides_block = False               # answer with a saved deck
+        self.force_length_once = False          # first reply is cut off, to test the continuation
         self.extra_blocks = False               # emit flashcard and table blocks in the default answer
         self.memory_add = False                 # let the memory model propose a new memory
         self.no_cost = False                    # drop usage.cost to test the table fallback
@@ -134,6 +139,15 @@ class FakeOpenRouter:
             text += '```quiz\n{"questions":[{"q":"What do plants eat?","options":["Light","Rocks"],"answer":0,"why":"They use sunlight."}]}\n```\n\n'
         if "diagram" in low and "svg" in sys:
             text += "```svg\n" + SVG + "\n```\n\n"
+        if self.image_block or ("write ONE fenced block tagged image" in sys and "draw" in low):
+            text += "```image\nA labelled cross-section of a leaf, flat vector style, white background\n```\n\n"
+        if self.doc_block or ("ONE fenced block tagged doc" in sys and "document" in low):
+            text += ('```doc title="AI Learning Guide"\n# AI Learning Guide\n\n## The core idea\n'
+                     'A model learns patterns from examples instead of hand written rules.\n\n'
+                     '## Why it matters\nIt generalises to data it has never seen.\n```\n\n')
+        if self.slides_block or ("ONE fenced block tagged slides" in sys and "deck" in low):
+            text += ('```slides title="Water"\n# Water\nA short deck\n\n---\n\n## It falls\n- Rain\n\n---\n\n'
+                     '## It rises\n- Evaporation\n```\n\n')
         if self.extra_blocks:
             text += '```flashcards\n{"title":"Deck","cards":[{"front":"Q1","back":"A1"},{"front":"Q2","back":"A2"},{"front":"Q3","back":"A3"}]}\n```\n\n'
             text += '```table\n{"title":"Compare","columns":[{"key":"n","label":"Name"},{"key":"v","label":"Value","type":"number"}],"rows":[{"n":"a","v":1},{"n":"b","v":2}]}\n```\n\n'
@@ -154,6 +168,11 @@ class FakeOpenRouter:
                              "supported_parameters": ["reasoning", "max_tokens"]})
             data.append({"id": "newlab/new-model", "name": "New Model", "context_length": 32000,
                          "pricing": {"prompt": "0.0000005", "completion": "0.000002"}, "supported_parameters": ["reasoning"]})
+            for mid, name, pin, pout in [("google/gemini-3.1-flash-image", "Nano Banana 2", "0.0000005", "0.000003"),
+                                         ("google/gemini-3-pro-image", "Nano Banana Pro", "0.000002", "0.000012")]:
+                data.append({"id": mid, "name": name, "context_length": 32000,
+                             "pricing": {"prompt": pin, "completion": pout}, "supported_parameters": [],
+                             "architecture": {"output_modalities": ["image", "text"]}})
             return {"data": data}
 
         @app.post("/chat/completions")
@@ -184,6 +203,15 @@ class FakeOpenRouter:
             if not self.no_cost:
                 usage["cost"] = (tin * pin + tout * pout) / 1e6 * self.cost_mult
             finish = "length" if empty else "stop"
+            if self.force_length_once and not empty:
+                self.force_length_once = False
+                finish = "length"
+            if body.get("modalities"):  # an image model always answers with a picture
+                import base64 as _b64
+                png = b"\x89PNG\r\n\x1a\n" + b"fake-image-bytes" * 8
+                data = "data:image/png;base64," + _b64.b64encode(png).decode()
+                return {"model": model, "choices": [{"message": {"role": "assistant", "content": "Here is the image.",
+                        "images": [{"image_url": {"url": data}}]}, "finish_reason": "stop"}], "usage": usage}
             if body.get("stream"):
                 def gen():
                     for i in range(0, len(text), 40):

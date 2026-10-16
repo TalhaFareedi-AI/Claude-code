@@ -7,7 +7,7 @@ const results = [];
 const check = (name, ok) => { assert.ok(ok, name); results.push(name); console.log('PASS  ' + name); };
 
 (async () => {
-  const browser = await chromium.launch({ executablePath: process.env.CHROME || '/usr/bin/chromium', args: ['--no-sandbox'] });
+  const browser = await chromium.launch({ executablePath: process.env.CHROME || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome', args: ['--no-sandbox'] });
   try {
     const context = await browser.newContext({ viewport: { width: 1280, height: 820 } });
     const page = await context.newPage(), errors = [], requests = [];

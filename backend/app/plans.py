@@ -10,7 +10,7 @@ from .db import DB, jdump, jload, now
 
 PLAN_RULES = {
     "free": {"tiers": ["quick"], "max_rounds": 1, "max_tries": 1, "charts_per_day": 2, "retention_days": 7,
-             "storage_mb": 50, "mcp": False, "images": False, "private_default": False},
+             "storage_mb": 20, "mcp": False, "images": False, "private_default": False},
     "student": {"tiers": ["quick", "smart"], "max_rounds": 3, "max_tries": 3, "charts_per_day": 50, "retention_days": 14,
                 "storage_mb": 500, "mcp": False, "images": True, "private_default": False},
     "pro": {"tiers": ["quick", "smart", "genius"], "max_rounds": 5, "max_tries": 5, "charts_per_day": 500,

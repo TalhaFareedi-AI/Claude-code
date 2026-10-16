@@ -9,12 +9,16 @@ Nothing in the AI's text is trusted: every block is validated before the screen 
 import re
 import uuid
 
-from . import charts, prompts, workspace
+from . import catalog, charts, prompts, workspace
 from .db import jdump, now
+from .openrouter import OpenRouterError
 from .tools import calc as calc_tool, diagram
 
 NEXT = re.compile(r"\[\[\s*next\s*:\s*(.+?)\]\]", re.I | re.S)
-BLOCK = re.compile(r"```(chart|svg|quiz|flashcards|table)[ \t]*\n(.*?)```", re.S)
+BLOCK = re.compile(r"```(chart|svg|quiz|flashcards|table|image)[ \t]*\n(.*?)```", re.S)
+# A document keeps its title on the fence line, so a long markdown body needs no JSON escaping.
+DOC_BLOCK = re.compile(r"```(doc|slides)[ \t]*(?:title=\"([^\"\n]{1,120})\")?[ \t]*\n(.*?)\n?```", re.S)
+DOC_MAX_CHARS = 200_000
 MARK = re.compile(r"\[\[artifact:(a_[0-9a-f]{8,12})\]\]")
 DEFAULT_BUTTONS = ["Explain simpler", "Quiz me", "Show a graph"]
 MAX_FIX = 2
@@ -93,6 +97,43 @@ def validate_table(d) -> dict:
     return {"title": str(d.get("title", "Table"))[:80], "columns": clean_cols, "rows": clean_rows}
 
 
+def slide_count(body: str) -> int:
+    return len([p for p in re.split(r"(?m)^---[ \t]*$", body) if p.strip()])
+
+
+async def doc_artifact(ctx, kind: str, title: str, body: str) -> str:
+    """Save a written document as a real .md file in the user's workspace and show it as an artifact."""
+    body = body.strip()
+    if len(body) > DOC_MAX_CHARS:
+        body = body[:DOC_MAX_CHARS] + "\n\n_(truncated: the document hit the size limit)_"
+    if len(body) < 40:
+        ctx.notices.append("The document came back almost empty, so I left it out.")
+        return ""
+    title = (title or "").strip() or next((ln.lstrip("# ").strip() for ln in body.splitlines() if ln.startswith("#")), "Document")
+    title = title[:80]
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48] or kind
+    try:
+        workspace.check_storage(ctx.db, ctx.user["id"], ctx.plan, len(body.encode()))
+    except workspace.PathEscape as e:
+        ctx.notices.append(str(e))
+        ctx.emit("notice", text=str(e))
+        return ""
+    d = workspace.task_dir(ctx.user["id"], ctx.task["id"])
+    path = d / "out" / f"{slug}.md"
+    n = 2
+    while path.exists():
+        path = d / "out" / f"{slug}-{n}.md"
+        n += 1
+    path.write_text(body)
+    rec = workspace.register(ctx.db, ctx.user["id"], ctx.task["id"], path, kind, ctx.plan)
+    ctx.files.append(rec)
+    data = {"title": title, "body": body, "file_id": rec["id"], "name": rec["name"],
+            "words": len(body.split()), "slides": slide_count(body) if kind == "slides" else 0}
+    art = new_artifact(ctx, kind, data)
+    ctx.emit("file_created", file=rec)
+    return f"\n\n[[artifact:{art['id']}]]\n\n"
+
+
 def new_artifact(ctx, kind: str, data: dict) -> dict:
     art = {"id": "a_" + uuid.uuid4().hex[:10], "kind": kind, "data": data}
     ctx.db.run("INSERT INTO artifacts(id,user_id,task_id,kind,data,created_at) VALUES(?,?,?,?,?,?)",
@@ -166,9 +207,49 @@ async def handle_block(ctx, kind: str, body: str) -> str:
                     ctx.notices.append(f"The {kind} block was not readable, so I left it out.")
                     return ""
                 raw = await repair(ctx, kind, raw, str(e))
+    if kind == "image":
+        return await image_artifact(ctx, body)
     if kind == "svg":
         return await svg_artifact(ctx, body)
     return ""
+
+
+MAX_IMAGES = 2
+
+
+async def image_artifact(ctx, prompt: str) -> str:
+    """Generate one picture, if the user turned images on and chose a model."""
+    from .tools import image as image_tool
+    if "images" not in ctx.req.tools:
+        return ""
+    if ctx.images_made >= MAX_IMAGES:
+        ctx.notices.append(f"I stopped at {MAX_IMAGES} generated images for this answer.")
+        return ""
+    model = image_tool.chosen_model(ctx)
+    if not model:
+        if not ctx.asked_image_model:
+            ctx.asked_image_model = True
+            options = [{"id": m["id"], "name": m["name"], "price_out": m["price_out"]}
+                       for m in catalog.image_models(ctx.db)[:6]]
+            ctx.emit("ask", kind="image_model", options=options,
+                     text="I can draw this, but pictures cost real money, so pick which image model to use."
+                          if options else "No image model is approved yet. An admin can approve one in the Models tab.")
+            ctx.notices.append("Choose an image model in Settings to let me draw pictures.")
+        return ""
+    ctx.emit("tool_start", tool="image", title="Drawing a picture")
+    try:
+        rec = await image_tool.generate(ctx, prompt, model)
+    except (image_tool.ImageError, workspace.PathEscape, OpenRouterError) as e:
+        ctx.emit("tool_result", tool="image", ok=False, summary=str(e)[:160], cost=ctx.meter.credits)
+        ctx.notices.append(f"The picture could not be made ({str(e)[:90]}), so I left it out.")
+        return ""
+    ctx.images_made += 1
+    ctx.files.append(rec)
+    art = new_artifact(ctx, "image", {"file_id": rec["id"], "name": rec["name"], "prompt": prompt.strip()[:300],
+                                      "model": model["name"]})
+    ctx.emit("file_created", file=rec)
+    ctx.emit("tool_result", tool="image", ok=True, summary=rec["name"], cost=ctx.meter.credits)
+    return f"\n\n[[artifact:{art['id']}]]\n\n"
 
 
 async def svg_artifact(ctx, raw: str, name: str = "diagram") -> str:
@@ -198,6 +279,13 @@ async def svg_artifact(ctx, raw: str, name: str = "diagram") -> str:
 
 async def finalize(ctx, text: str) -> tuple[str, list[str], list[dict]]:
     text, _ = calc_tool.fill(text or "")
+    out, last = [], 0
+    for m in DOC_BLOCK.finditer(text):
+        out.append(text[last:m.start()])
+        out.append(await doc_artifact(ctx, m.group(1), m.group(2) or "", m.group(3)))
+        last = m.end()
+    out.append(text[last:])
+    text = "".join(out)
     matches = NEXT.findall(text)
     buttons = [clean_label(b) for b in re.split(r"\s*\|\s*", matches[-1])] if matches else []
     buttons = [b for b in buttons if b][:3]

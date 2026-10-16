@@ -31,7 +31,8 @@ def strip_next(text: str) -> str:
 
 
 def mt(ctx: RunContext, role: str) -> int:
-    return ctx.mode["max_tokens"].get(role, 1500)
+    """Output budget for a role, after the user's response-length preference."""
+    return ctx.out_tokens(role)
 
 
 def step(ctx: RunContext, n: int, title: str, **kw) -> None:

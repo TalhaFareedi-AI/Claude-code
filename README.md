@@ -32,18 +32,23 @@ automatically approved. Keep the token in secure settings and out of command his
 
 ```bash
 python -m pytest                        # backend unit/integration tests, no network, no cost
+bash scripts/ui_all.sh                  # all 5 browser suites, each on its own fresh demo server
 python backend/tests/demo_server.py     # the real app on port 8765, backed by the fake OpenRouter
-node scripts/ui_check.cjs               # 19 checks in a real browser against that server
+node scripts/ui_check.cjs               # 21 checks in a real browser against that server
+node scripts/docs_ui_check.cjs          # documents, decks, pictures, the reader and answer length
 node scripts/team_ui_check.cjs          # team controls, edited approval, reload and reconnect
 node scripts/chart_regression.cjs       # isolated browser regressions for extreme chart ranges
 python scripts/live_test.py --quick     # REAL OpenRouter: key check, model sync, one call, cost check
+python scripts/live_test.py --artifacts # REAL OpenRouter: documents, charts and the length dial
 python scripts/live_test.py             # REAL OpenRouter: every mode on the cheapest brains
 ```
 
 `BRAIN_POLICY=cheap` (the default for now) makes every brain slot use the cheapest Quick or Smart model, so tests
 cost almost nothing. Set `BRAIN_POLICY=preferred` to use the plan's tiers (Quick, Smart, Genius) as written.
 
-The browser scripts require Playwright and Chromium. Set `CHROME=/usr/bin/chromium` when using the system browser.
+The browser scripts require Playwright and Chromium. Set `CHROME=/path/to/chrome` to use another browser.
+`scripts/ui_all.sh` starts the right server for each suite (`ui_check`, `platform_ui_check` and `team_ui_check`
+need the plan rules, so they run without `UNLOCK_ALL`) and never lets one suite inherit another's data.
 
 ## Agent teams and optional teaching
 
@@ -93,7 +98,7 @@ See [the plan coverage matrix](docs/plan-coverage.md) for every plan section, te
 
 ## Not built yet (so you know)
 
-Payments (Stripe, Toss), real accounts and login (a cookie id is used), image generation, MCP servers, the
+Payments (Stripe, Toss), real accounts and login (a cookie id is used), MCP servers, the
 sandboxed mini-app iframe (Level B charts), Langfuse, promptfoo test set, PPT page-image previews (LibreOffice),
 virus scanning of uploads (type and signature checks only), and a safety filter on messages and answers.
 
@@ -144,8 +149,26 @@ Run `python -m pytest` (192 tests), then `python backend/tests/demo_server.py` a
 - **Owner mode:** `UNLOCK_ALL=1` in `.env` gives every visitor the hidden Owner plan (all modes, brains, max effort,
   100,000 credits). Good while you are the only user. Set it to 0 before real users arrive.
 
-Browser checks: `node scripts/layout_ui_check.cjs` (24, start the server with `UNLOCK_ALL=1`), `scripts/ui_check.cjs` (19),
-`scripts/platform_ui_check.cjs` (23), `scripts/team_ui_check.cjs` (15). Unit tests: `python -m pytest` (194).
+Browser checks: `bash scripts/ui_all.sh` runs all five (21 + 23 + 15 + 24 + 18 = 101 checks). Unit tests:
+`python -m pytest` (219).
+
+## Documents, decks, pictures and answer length
+
+- **Documents and decks.** Ask for a document, guide, cheat sheet or deck and the answer comes back as a card in
+  the chat: title, length and a real preview. "Open" shows it full width in the workspace panel on the right. It is
+  saved as a Markdown file in the user's workspace, listed with every other file, and the 🗑 button deletes it from
+  the disk and the database at once. Every free user gets 20 MB; the meter at the top of the panel shows what is left.
+  The heavy Office builders (`.pptx`, `.docx`) now wait until the request actually asks for that file ("make a
+  PowerPoint", "a Word doc I can send"), or until a follow-up edits one this chat already built.
+- **Answer length.** Settings > Effort and limits has Auto / Short / Normal / Long. It scales the output budget of
+  every writing role (×0.5, ×1, ×2). If an answer still hits the limit, it is finished in a second pass and the
+  footer says so, so an answer is never cut off mid-sentence.
+- **Pictures.** Charts and diagrams are drawn as real SVG that moves with the sliders, and the prompts forbid ASCII
+  art outright. For a photo-like picture, turn on the "Generated images" tool: the AI then asks which image model to
+  use (Nano Banana 2 Lite, Nano Banana 2, Nano Banana Pro, GPT-5 Image Mini, GPT-5 Image) or uses the one chosen in
+  Settings > Tools and skills. Nothing is drawn until a model is picked, because every picture costs real money; the
+  cost of one picture is added to the estimate and to that message's cost cap. Image models are never offered as a
+  thinking brain, and at most two pictures are drawn per answer.
 
 ## Deploy
 See [DEPLOY.md](DEPLOY.md): Dockerfile, docker-compose.yml and a Render blueprint (render.yaml) are included. Use `UNLOCK_ALL=admin` on a public site.

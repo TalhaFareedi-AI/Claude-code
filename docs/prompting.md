@@ -36,3 +36,24 @@ used only when the user turns Teaching mode on in Settings → Build and check.
 
 A greeting gets neither the learning profile nor saved memories on the desk: both used to read as the current
 task, which made "hi" answer the previous chat's question.
+
+## Pictures instead of ASCII art
+
+`direct.v1.md` and `teacher.v2.md` both end with a flat ban on ASCII art, box-drawing characters and text
+diagrams, and point at the block the model was actually given. Those blocks arrive the same way the skills do:
+`doc_rules`, `slides_rules`, `chart_rules`, `diagram_rules`, `quiz_rules`, `flashcard_rules`, `table_rules` and
+`image_rules` load only when that artifact is wanted, so a plain answer still pays ~366 tokens. A document or a
+deck pulls the chart and diagram rules with it, because those are what a document embeds.
+
+`python scripts/live_test.py --artifacts` checks this on real models for about a tenth of a cent: a document ask
+has to produce a real `.md` file, a chart ask has to produce a drawn chart, and neither answer may contain ASCII
+art (the test greps for box-drawing characters). The length dial is checked in the same run.
+
+## Answer length
+
+`RunRequest.length` (auto / short / medium / long) scales `max_tokens` for the writing roles only
+(`answer`, `judge`, `write`, `rewrite`, `writer`, `worker`, `teacher`, `finisher`, `builder`) by ×0.5, ×1 and ×2,
+clamped to 256…32,000. Thinking budgets are left alone, so Long buys more answer, not more scrap paper.
+
+When a model still stops at `finish_reason == "length"`, the harness sends one continuation call with the partial
+answer as context, merges the usage, and adds a notice. An answer is never left cut off mid-sentence.

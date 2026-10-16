@@ -19,7 +19,7 @@ from . import activity, catalog, charts, memory, modes as modes_mod, prompts, sk
 from .config import settings
 from .db import DB, jdump, jload, now
 from .estimate import estimate
-from .openrouter import LLMResult, OpenRouter, OpenRouterError, build_reasoning
+from .openrouter import LLMResult, OpenRouter, OpenRouterError, Usage, build_reasoning
 from . import plans as plans_mod
 from .plans import rules as plan_rules
 from .pricing import EFFORT_ORDER, call_cost, clamp_effort, credits_for_cost
@@ -66,6 +66,8 @@ class RunRequest:
     uploads: list[str] = field(default_factory=list)  # workspace_files ids from /api/upload
     team: dict = field(default_factory=dict)
     teacher_enabled: bool = False  # teaching style is opt-in: by default the assistant answers directly
+    length: str = "auto"           # auto | short | medium | long: how much room the answer gets
+    image_model: str | None = None  # which model draws pictures; the user picks it
     teacher_model: str | None = None
     approved_plan: list[dict] | None = None
     request_id: str | None = None
@@ -194,6 +196,8 @@ class RunContext:
         self.summary = ""
         self.memory_block = ""
         self.memory_command: dict | None = None
+        self.images_made = 0
+        self.asked_image_model = False
         self._brain_cache: dict = {}
         self.runner = mode["runner"]
         self.rounds: int | None = None
@@ -219,6 +223,18 @@ class RunContext:
             self.emit("text", delta=text[i:i + 160])
 
     # ---- brains ---------------------------------------------------------------
+    #: How much room an answer gets. Multiplies the mode's own max_tokens for output-facing roles.
+    LENGTH_FACTOR = {"short": 0.5, "medium": 1.0, "long": 2.0}
+    OUTPUT_ROLES = ("answer", "judge", "write", "rewrite", "writer", "worker", "teacher", "finisher", "builder")
+
+    def out_tokens(self, role: str, base: int | None = None) -> int:
+        """Token budget for one call, after the user's length preference."""
+        base = base if base is not None else self.mode["max_tokens"].get(role, 1500)
+        if role not in self.OUTPUT_ROLES:
+            return base
+        factor = self.LENGTH_FACTOR.get(self.req.length, 1.0)
+        return max(256, min(int(base * factor), 32000))
+
     def effort(self, role: str) -> str:
         default = self.mode["reasoning"].get(role, "off")
         if self.req.effort != "auto" and role not in CONTROL_ROLES and default != "off":
@@ -322,9 +338,10 @@ class RunContext:
     async def call(self, role: str, model: dict, messages: list, *, max_tokens: int, effort: str = "off",
                    json_mode: bool = False, stream: bool = False, plugins: list | None = None,
                    extra_usd: float = 0.0, budget_check: bool = True, tools: list | None = None,
-                   max_tool_calls: int | None = None, agent_id: str | None = None,
+                   max_tool_calls: int | None = None, modalities: list | None = None,
+                   agent_id: str | None = None,
                    agent_max_credits: int | None = None, agent_timeout_s: float | None = None,
-                   _empty_retry: bool = False) -> LLMResult:
+                   _empty_retry: bool = False, _continued: bool = False) -> LLMResult:
         self.check_stop()
         reasoning = build_reasoning(model, effort, max_tokens)
         fallbacks = catalog.fallbacks(self.db, model["id"], 2, private_only=self.private)
@@ -352,7 +369,7 @@ class RunContext:
             if agent_id:
                 self.agent_reserved[agent_id] = self.agent_reserved.get(agent_id, Decimal(0)) + required
         t0 = time.monotonic()
-        kw = dict(reasoning=reasoning, fallbacks=fallbacks, json_mode=json_mode, private=self.private,
+        kw = dict(reasoning=reasoning, fallbacks=fallbacks, json_mode=json_mode, private=self.private, modalities=modalities,
                   zdr=self.private and self.plan == "school", plugins=plugins)
         if tools is not None:
             kw["tools"] = tools
@@ -418,6 +435,31 @@ class RunContext:
                                    max_tool_calls=max_tool_calls, extra_usd=extra_usd, agent_id=agent_id,
                                    agent_max_credits=agent_max_credits, agent_timeout_s=agent_timeout_s,
                                    _empty_retry=True)
+        # Cut off mid-sentence: finish it once rather than leaving a half-written answer on screen.
+        if (res.finish_reason == "length" and res.text.strip() and not json_mode
+                and not _continued and role in self.OUTPUT_ROLES):
+            try:
+                more = await self.call(role, model, messages + [
+                    {"role": "assistant", "content": res.text},
+                    {"role": "user", "content": "You were cut off by the output limit. Continue from exactly where you "
+                     "stopped, starting with the very next character. Do not repeat anything, do not restate the "
+                     "question, and do not add a closing summary that was not already due."}],
+                    max_tokens=max_tokens, effort="off", stream=stream, plugins=plugins, extra_usd=0.0,
+                    agent_id=agent_id, agent_max_credits=agent_max_credits, agent_timeout_s=agent_timeout_s,
+                    budget_check=budget_check, _continued=True)
+            except (LimitReached, OpenRouterError, UserError):
+                self.notices.append("The answer was cut short by the output limit. Ask for the rest, or pick a longer "
+                                    "response length in Settings.")
+                self.emit("notice", text=self.notices[-1])
+                return res
+            joined = res.text.rstrip() + ("\n\n" if res.text.rstrip().endswith((".", "!", "?", ":", "`")) else " ") + more.text.lstrip()
+            usage = Usage(prompt=res.usage.prompt + more.usage.prompt, cached=res.usage.cached + more.usage.cached,
+                          completion=res.usage.completion + more.usage.completion,
+                          reasoning=res.usage.reasoning + more.usage.reasoning,
+                          cost=(res.usage.cost or 0) + (more.usage.cost or 0) if res.usage.cost is not None else None)
+            self.emit("notice", text="The answer hit the output limit, so I finished it in a second pass.")
+            return LLMResult(joined, more.model, usage, more.finish_reason, more.reasoning_text,
+                             res.images + more.images, res.sources + more.sources)
         if not res.text.strip():
             raise UserError("The model returned no answer. Try a different brain or a larger output budget.")
         return res
@@ -445,17 +487,18 @@ class RunContext:
 
     # ---- the desk (context budget, section 4) ----------------------------------------
     def system_prompt(self) -> str:
+        """Tool rules are loaded only when that artifact is actually wanted, so a plain answer stays cheap."""
         parts = [prompts.get("teacher") if self.req.teacher_enabled else prompts.get("direct")]
-        if "chart" in self.needs and "chart" in self.req.tools:
-            parts.append(prompts.get("chart_rules"))
-        if "diagram" in self.req.tools and "diagram" in self.needs:
-            parts.append(prompts.get("diagram_rules"))
-        if self.intent == "quiz" or "quiz" in self.needs:
-            parts.append(prompts.get("quiz_rules"))
-        if "flashcards" in self.needs:
-            parts.append(prompts.get("flashcard_rules"))
-        if "table" in self.needs:
-            parts.append(prompts.get("table_rules"))
+        wants = set(self.needs) | ({"quiz"} if self.intent == "quiz" else set())
+        # a document or deck can embed a chart or a diagram, so those rules travel with it
+        if wants & {"doc", "slides"}:
+            wants |= {"chart", "diagram"}
+        for need, tool, rules in (("doc", "documents", "doc_rules"), ("slides", "ppt", "slides_rules"),
+                                  ("chart", "chart", "chart_rules"), ("diagram", "diagram", "diagram_rules"),
+                                  ("quiz", None, "quiz_rules"), ("flashcards", "flashcards", "flashcard_rules"),
+                                  ("table", "table", "table_rules"), ("image", "images", "image_rules")):
+            if need in wants and (tool is None or tool in self.req.tools):
+                parts.append(prompts.get(rules))
         return "\n\n".join(parts)
 
     def context_block(self) -> str:
@@ -629,15 +672,31 @@ class Harness:
         return count
 
     # ---- routing (rules first, AI only when unsure) -------------------------------
+    def _office_kind(self, req: RunRequest) -> str | None:
+        """pptx or docx, when this chat already built one. A follow-up then edits that file."""
+        if not req.conversation_id:
+            return None
+        row = self.db.one("SELECT f.kind FROM workspace_files f JOIN tasks t ON t.id=f.task_id "
+                          "WHERE t.conversation_id=? AND f.kind IN ('pptx','docx') ORDER BY f.id DESC LIMIT 1",
+                          (req.conversation_id,))
+        return row["kind"] if row else None
+
     def route_rules(self, req: RunRequest) -> dict:
         m = req.message.strip()
         low = m.lower()
         words = len(m.split())
         intent, needs = req.intent or "", []
         if not intent:
-            if re.search(r"\b(ppt|powerpoint|slides?|slide deck|presentation)\b", low) and re.search(r"\b(make|create|build|generate|write|prepare)\b", low):
+            # The Office builders (.pptx, .docx) are the slow, expensive path, so they wait for a request
+            # that actually asks for that file. A plain "write me a document" gets the quick reading
+            # document instead: Markdown, shown in the chat and kept in the workspace.
+            office = bool(re.search(r"\b(pptx?|powerpoint|docx?|word|download(able)?|office|"
+                                    r"file i can (open|edit|share|send)|send me the file)\b", low))
+            office = office or self._office_kind(req) is not None  # a follow-up edits the file this chat built
+            make = bool(re.search(r"\b(make|create|build|generate|write|prepare|draft)\b", low))
+            if make and office and re.search(r"\b(ppt|pptx|powerpoint|slides?|slide deck|deck|presentation)\b", low):
                 intent = "make_ppt"
-            elif re.search(r"\b(word doc|docx|document|essay|report|worksheet|lesson plan)\b", low) and re.search(r"\b(make|create|write|generate|prepare|draft)\b", low):
+            elif make and office and re.search(r"\b(doc|docx|document|essay|report|worksheet|lesson plan|handout)\b", low):
                 intent = "make_doc"
             elif re.search(r"\b(research|latest|news|sources?|find out|look up|search the web)\b", low):
                 intent = "research"
@@ -659,10 +718,18 @@ class Harness:
             needs.append("diagram")
         if intent == "quiz":
             needs.append("quiz")
+        if intent == "make_doc" or re.search(r"\b(docu?ment|docuemnt|write[ -]?up|guide|cheat ?sheet|handout|report|"
+                                             r"study notes|revision notes|worksheet|lesson plan)\b", low):
+            needs.append("doc")
+        if intent == "make_ppt" or re.search(r"\b(slides?|deck|presentation|powerpoint|ppt)\b", low):
+            needs.append("slides")
         if re.search(r"\bflash ?cards?\b|\bmemori[sz]e\b|\brevision cards?\b", low):
             needs.append("flashcards")
         if re.search(r"\btables?\b|\bcompare .{0,40}\b(and|vs|versus)\b|\bside by side\b", low):
             needs.append("table")
+        if "images" in req.tools and re.search(r"\b(pictures?|images?|photos?|illustrations?|draw|drawing|"
+                                               r"render|artwork|poster)\b", low):
+            needs.append("image")
         if GREETING.match(m) or (words <= 8 and not re.search(r"\d", m) and not needs and intent in ("chat", "teach")):
             complexity = "easy"
         elif words > 60 or HARD_WORDS.search(low) or intent in ("make_ppt", "make_doc"):
@@ -708,6 +775,14 @@ class Harness:
             raise UserError(f"{m['name']} is not part of your plan. Try Normal, or upgrade.")
         return m
 
+    @staticmethod
+    def _image_model(ctx: RunContext, route: dict) -> dict | None:
+        """The image model to budget for, when this ask looks like it wants a drawn picture."""
+        if "image" not in route["needs"] or "images" not in ctx.req.tools:
+            return None
+        from .tools import image as image_tool
+        return image_tool.chosen_model(ctx)
+
     # ---- estimate (shown before the run) ---------------------------------------------
     def make_estimate(self, ctx: RunContext, route: dict) -> dict:
         mode = dict(ctx.mode)
@@ -729,7 +804,7 @@ class Harness:
                             min(mode["params"].get("max_tries", 5), ctx.rules["max_tries"]))
         ctx.rounds, ctx.tries = rounds, tries
         est = estimate(mode, roles, rounds=rounds, tries=tries, effort=ctx.req.effort,
-                       chart="chart" in route["needs"])
+                       chart="chart" in route["needs"], image_model=self._image_model(ctx, route))
         extra_parts = team_estimate(ctx) if ctx.runner in ("deep", "research", "create") else []
         if ctx.runner in ("deep", "research"):
             replaced = {"plan"} | ({"searches"} if ctx.runner == "research" else set())
@@ -933,8 +1008,10 @@ class Harness:
                 if used >= mode["daily_limit"]:
                     raise UserError(f"{mode['name']} is limited to {mode['daily_limit']} runs a day. Try another mode.")
             est = self.make_estimate(ctx, route)
-            cap = req.max_credits or min(mode["max_credits"], max(user["auto_spend"], est["credits"]))
-            cap = max(1, min(cap, mode["max_credits"]))
+            # A picture the user asked for is paid media, not thinking, so it gets room above the mode's cap.
+            ceiling = mode["max_credits"] + est.get("media_credits", 0)
+            cap = req.max_credits or min(ceiling, max(user["auto_spend"], est["credits"]))
+            cap = max(1, min(cap, ceiling))
             if req.continue_task:
                 cap = max(1, min(req.extra_credits, mode["max_credits"]))
             cap = max(1, min(cap, remaining_limit))  # never past the daily or monthly limit

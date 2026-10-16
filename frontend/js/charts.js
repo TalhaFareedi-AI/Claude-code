@@ -313,3 +313,42 @@ export function renderTable(t) {
     h('div', { class: 'tbl-scroll' }, h('table', { class: 'data-table' }, h('thead', null, head), body)),
     h('p', { class: 'muted tiny', text: 'Click a column heading to sort.' }));
 }
+
+// A written document or deck. The full text lives in a real file in the workspace; this is the card for it.
+export function renderDoc(d, kind = 'doc') {
+  const open = () => document.dispatchEvent(new CustomEvent('sh:open-file', { detail: { id: d.file_id, name: d.name, kind } }));
+  const meta = kind === 'slides' ? `${d.slides} slides` : `${(d.words || 0).toLocaleString('en')} words`;
+  const preview = h('div', { class: 'doc-preview' });
+  preview.append(renderMarkdownInto(d.body.slice(0, 1200)));
+  const card = h('div', { class: 'art doc-art', role: 'group', 'aria-label': `${kind === 'slides' ? 'Deck' : 'Document'}: ${d.title}` },
+    h('div', { class: 'doc-head' },
+      h('span', { class: 'doc-ico', 'aria-hidden': 'true', text: kind === 'slides' ? '📊' : '📄' }),
+      h('div', { class: 'doc-meta' }, h('b', { text: d.title }), h('span', { class: 'muted tiny', text: `${meta} · saved as ${d.name}` })),
+      h('button', { type: 'button', class: 'btn small primary', text: 'Open', onclick: open })),
+    preview,
+    h('button', { type: 'button', class: 'doc-more', text: 'Open the full document →', onclick: open }));
+  return card;
+}
+
+// renderMarkdown lives in markdown.js; charts.js stays free of that import by resolving it lazily.
+let mdRender = null;
+export function setMarkdownRenderer(fn) { mdRender = fn; }
+function renderMarkdownInto(text) {
+  if (mdRender) return mdRender(text);
+  return h('pre', { class: 'muted small', text });
+}
+
+// A generated picture. The bytes live in the user's workspace, so the <img> uses a short-lived signed link.
+export function renderImage(d) {
+  const img = h('img', { alt: d.prompt || 'Generated picture', loading: 'lazy' });
+  const box = h('div', { class: 'art image-art' },
+    img,
+    h('div', { class: 'img-foot' },
+      h('span', { class: 'muted tiny', text: `${d.name} · drawn by ${d.model}` }),
+      h('button', { type: 'button', class: 'btn small', text: 'Open', onclick: () => document.dispatchEvent(new CustomEvent('sh:open-file', { detail: { id: d.file_id, name: d.name, kind: 'image' } })) })));
+  fetch(`/api/files/${encodeURIComponent(d.file_id)}/link`)
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error('link'))))
+    .then(({ url }) => { img.src = url; })
+    .catch(() => { box.replaceChildren(h('p', { class: 'muted small', text: 'The picture is no longer available.' })); });
+  return box;
+}

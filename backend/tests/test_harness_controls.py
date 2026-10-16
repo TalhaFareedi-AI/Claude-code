@@ -234,3 +234,34 @@ async def test_teacher_cannot_drop_original_code_and_sources(harness, fake, monk
     final = [e for e in events if e["type"] == "text" and e.get("replace")][-1]["delta"]
     assert final == answer
     assert any(e["type"] == "notice" and "original answer is preserved" in e["text"] for e in events)
+
+
+async def test_a_cut_off_answer_is_finished_in_a_second_pass(harness, fake, monkeypatch):
+    """Overthink once ended a document mid-word at '**Step 2'. Truncation must be repaired, not shipped."""
+    original = fake._reply
+    calls = {"n": 0}
+
+    def reply(body):
+        system = body["messages"][0]["content"]
+        if isinstance(system, str) and "cut off by the output limit" in str(body["messages"][-1]["content"]):
+            calls["n"] += 1
+            return "continued to the end."
+        return original(body)
+    monkeypatch.setattr(fake, "_reply", reply)
+    monkeypatch.setattr(fake, "force_length_once", True)
+
+    _, events = await run(harness, message="Write a long explanation of gradient descent", mode="normal")
+    assert events[-1]["status"] == "done"
+    text = ""
+    for e in events:
+        if e["type"] == "text":
+            text = e["delta"] if e.get("replace") else text + e["delta"]
+    assert text.endswith("continued to the end.") and calls["n"] == 1
+    assert any(e["type"] == "notice" and "second pass" in e["text"] for e in events)
+
+
+async def test_response_length_changes_the_output_budget(harness, fake):
+    for length, expect in (("short", 1500), ("long", 6000), ("auto", 3000)):
+        fake.requests.clear()
+        await run(harness, message="Explain gravity", mode="normal", length=length)
+        assert fake.requests[0]["max_tokens"] == expect, length

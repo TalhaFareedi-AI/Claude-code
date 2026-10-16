@@ -5,7 +5,7 @@ import sqlite3
 import httpx
 import pytest
 
-from app import accounts, activity, billing, memory, plans, wallet
+from app import accounts, activity, billing, memory, plans, wallet, workspace
 from app.config import settings
 from app.db import DB, now
 from app.harness import RunRequest
@@ -543,3 +543,133 @@ def test_memory_is_labelled_as_background_not_as_a_task(db):
     memory.add(db, "u_bg", "Studying for a June physics exam", importance=5, pinned=True)
     block, ids = memory.desk_block(db, db.one("SELECT * FROM users WHERE id='u_bg'"), None, "Explain inertia")
     assert ids and "not a task to carry out" in block and "Never answer it" in block
+
+
+# ---------------------------------------------------------------- documents
+async def test_a_document_becomes_a_real_file_the_user_owns(harness, db, fake, tmp_path):
+    fake.doc_block = True
+    harness.get_user("u_doc1")
+    tid, events = await run(harness, "u_doc1", message="create a document for learning AI", mode="normal")
+    art = [e for e in events if e["type"] == "artifact" and e["kind"] == "doc"][0]
+    assert art["data"]["title"] == "AI Learning Guide" and art["data"]["words"] > 5
+    row = db.one("SELECT * FROM workspace_files WHERE user_id='u_doc1' AND kind='doc'")
+    assert row and row["path"].endswith(".md") and row["size"] > 40
+    assert workspace.path_of(row).read_text().startswith("# AI Learning Guide")
+    assert art["data"]["file_id"] == row["id"]                      # the card points at the stored file
+    text = ""
+    for e in events:
+        if e["type"] == "text":
+            text = e["delta"] if e.get("replace") else text + e["delta"]
+    assert "```doc" not in text and f"[[artifact:{art['id']}]]" in text
+
+
+async def test_deleting_a_document_removes_the_file_and_the_row(api, db):
+    harness_ = api.state.harness
+    api.state.harness.llm._client._transport  # noqa: B018  (the fake transport is already wired)
+    async with client(api) as c:
+        h = {"x-user-id": "u_docdel"}
+        harness_.get_user("u_docdel")
+        d = workspace.task_dir("u_docdel", "t_manual", "manual")
+        p = d / "out" / "guide.md"
+        p.write_text("# Guide\n\nSome body text that is long enough to keep.")
+        rec = workspace.register(db, "u_docdel", "t_manual", p, "doc", "free")
+        assert (await c.get("/api/files", headers=h)).json()["files"]
+        prev = (await c.get(f"/api/files/{rec['id']}/preview", headers=h)).json()
+        assert prev["kind"] == "doc" and prev["markdown"].startswith("# Guide")
+        assert (await c.delete(f"/api/files/{rec['id']}", headers={"x-user-id": "u_other99"})).status_code == 404
+        assert (await c.delete(f"/api/files/{rec['id']}", headers=h)).status_code == 200
+    assert not p.exists()
+    assert db.one("SELECT id FROM workspace_files WHERE id=?", (rec["id"],)) is None
+
+
+async def test_documents_count_against_the_storage_quota(api, db, monkeypatch):
+    from app import plans as plans_mod
+    harness_ = api.state.harness
+    harness_.get_user("u_quota")
+    async with client(api) as c:
+        files = (await c.get("/api/files", headers={"x-user-id": "u_quota"})).json()
+        assert files["limit_bytes"] == 20 * 1024 * 1024          # 20 MB on the free plan
+    assert plans_mod.rules("free")["storage_mb"] == 20
+    d = workspace.task_dir("u_quota", "t_big", "big")
+    big = d / "out" / "big.md"
+    big.write_text("x" * 1000)
+    workspace.register(db, "u_quota", "t_big", big, "doc", "free")
+    with pytest.raises(workspace.PathEscape):
+        workspace.check_storage(db, "u_quota", "free", 21 * 1024 * 1024)
+
+
+async def test_slides_are_saved_as_a_deck_file(harness, db, fake):
+    fake.slides_block = True
+    harness.get_user("u_sl1")
+    tid, events = await run(harness, "u_sl1", message="make me a slide deck about water", mode="normal")
+    art = [e for e in events if e["type"] == "artifact" and e["kind"] == "slides"][0]
+    assert art["data"]["slides"] == 3
+    row = db.one("SELECT * FROM workspace_files WHERE user_id='u_sl1' AND kind='slides'")
+    assert row and workspace.path_of(row).read_text().count("---") >= 2
+
+
+# ---------------------------------------------------------------- generated pictures
+def test_image_models_are_detected_from_the_live_list(db):
+    from app import catalog
+    live = [{"id": "google/nano-banana-2.1", "name": "Nano Banana", "pricing": {"prompt": "0.0000015", "completion": "0.00003"},
+             "architecture": {"output_modalities": ["image", "text"]}, "supported_parameters": []},
+            {"id": "lab/text-only", "name": "Text", "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+             "architecture": {"output_modalities": ["text"]}, "supported_parameters": []}]
+    catalog.sync_live(db, live)
+    assert catalog.image_models(db) == []                      # new models wait for approval
+    catalog.approve(db, "google/nano-banana-2.1", "smart")
+    assert [m["id"] for m in catalog.image_models(db)] == ["google/nano-banana-2.1"]
+
+
+def test_only_a_real_picture_is_accepted():
+    import base64
+    from app.tools.image import ImageError, decode
+    png = b"\x89PNG\r\n\x1a\n" + b"body" * 10
+    url = "data:image/png;base64," + base64.b64encode(png).decode()
+    raw, ext = decode([{"image_url": {"url": url}}])
+    assert ext == "png" and raw == png
+    for bad in ([], [{"image_url": {"url": "https://example.com/a.png"}}],
+                [{"image_url": {"url": "data:image/png;base64,###"}}],
+                [{"image_url": {"url": "data:image/png;base64," + base64.b64encode(b"<svg onload=x>").decode()}}]):
+        with pytest.raises(ImageError):
+            decode(bad)
+
+
+# The catalog seeds real picture models, approved but never chosen for the user.
+IMAGE_MODEL = "google/gemini-3.1-flash-image"
+
+
+def test_picture_models_are_seeded_but_never_used_as_a_thinking_brain(db):
+    from app import catalog
+    assert IMAGE_MODEL in [m["id"] for m in catalog.image_models(db)]
+    assert IMAGE_MODEL not in [m["id"] for m in catalog.listing(db)]
+
+
+async def test_the_user_is_asked_which_image_model_before_anything_is_drawn(harness, db, fake):
+    fake.image_block = True
+    harness.get_user("u_img1")
+    tid, events = await run(harness, "u_img1", message="draw me a leaf", mode="fast", tools=["images"])
+    ask = [e for e in events if e["type"] == "ask" and e["kind"] == "image_model"]
+    assert ask and "pick which image model" in ask[0]["text"]
+    assert not db.all("SELECT id FROM workspace_files WHERE user_id='u_img1'")     # nothing drawn, nothing paid
+    assert not [e for e in events if e["type"] == "artifact" and e["kind"] == "image"]
+
+
+async def test_a_chosen_model_draws_and_stores_the_picture(harness, db, fake):
+    fake.image_block = True
+    fake.returns_image = True
+    harness.get_user("u_img2")
+    tid, events = await run(harness, "u_img2", message="draw me a leaf", mode="fast", tools=["images"],
+                            image_model=IMAGE_MODEL)
+    art = [e for e in events if e["type"] == "artifact" and e["kind"] == "image"]
+    assert art and art[0]["data"]["model"] == "Nano Banana 2"
+    row = db.one("SELECT * FROM workspace_files WHERE user_id='u_img2'")
+    assert row and row["kind"] == "png" and workspace.path_of(row).read_bytes().startswith(b"\x89PNG")
+
+
+async def test_images_stay_off_unless_the_tool_is_on(harness, db, fake):
+    fake.image_block = True
+    harness.get_user("u_img3")
+    tid, events = await run(harness, "u_img3", message="draw me a leaf", mode="fast", tools=["chart"])
+    assert not [e for e in events if e["type"] == "ask" and e["kind"] == "image_model"]
+    assert not db.all("SELECT id FROM workspace_files WHERE user_id='u_img3'")

@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS credit_holds(
 CREATE TABLE IF NOT EXISTS model_catalog(
   id TEXT PRIMARY KEY, name TEXT, lab TEXT, region TEXT, tier TEXT,
   price_in REAL, price_out REAL, price_cached REAL, thinks INTEGER DEFAULT 0,
-  reasoning_style TEXT DEFAULT 'effort', context INTEGER, available INTEGER DEFAULT 1,
+  reasoning_style TEXT DEFAULT 'effort', context INTEGER, available INTEGER DEFAULT 1, image_out INTEGER DEFAULT 0,
   approved INTEGER DEFAULT 1, private_route INTEGER DEFAULT 1, source TEXT, updated_at REAL);
 CREATE TABLE IF NOT EXISTS model_prices(
   id INTEGER PRIMARY KEY AUTOINCREMENT, model_id TEXT, price_in REAL, price_out REAL,
@@ -86,6 +86,8 @@ MIGRATIONS = [
     ("users", "memory_enabled INTEGER DEFAULT 1"), ("users", "last_seen_at REAL"), ("users", "plan_renews_at REAL"),
     ("users", "note TEXT"),
     ("conversations", "notes TEXT DEFAULT ''"),
+    ("model_catalog", "image_out INTEGER DEFAULT 0"),
+    ("users", "image_model TEXT"),
 ]
 
 # Full-text search keeps memory recall fast: past messages and saved memories are indexed as they are written.

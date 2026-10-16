@@ -182,7 +182,7 @@ function nextStep(label, messageId) {
 function buildPayload(message, opts = {}) {
   const p = {
     message, conversation_id: app.convId, mode: S.mode, brains: S.brains, effort: S.effort, rounds: S.rounds, tries: S.tries,
-    max_credits: S.cap, tools: S.tools, skills: S.skills, private_route: S.private || null, uploads: app.uploads.map((u) => u.id),
+    max_credits: S.cap, tools: S.tools, skills: S.skills, private_route: S.private || null, length: S.length || 'auto', image_model: S.image_model || null, uploads: app.uploads.map((u) => u.id),
     team: S.team, teacher_enabled: S.teacher_enabled, teacher_model: S.teacher_model,
   };
   if (opts.intent) p.intent = opts.intent;
@@ -256,6 +256,12 @@ function finishMessage(run, msgEl) {
 
 function handleAsk(a, msgEl, originalPayload) {
   if (a.kind === 'topup') return account.showPlans();
+  if (a.kind === 'image_model') {
+    S.image_model = a.model; persist(); paintChips();
+    fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image_model: a.model }) }).catch(() => {});
+    toast('Image model set. Ask again and I will draw it.');
+    return;
+  }
   if (app.running) return toast('Wait for the current run, or press Stop.');
   const old = originalPayload || app.lastPayload;
   if (!old) return toast('Open the chat again to restore this task.');
@@ -493,6 +499,11 @@ function wireStatic() {
     const f = e.target.files[0]; e.target.value = '';
     if (!f) return;
     try { const u = await uploadFile(f); app.uploads.push(u); paintAttachments(); toast(`Added ${u.name}`); } catch (err) { toast(err.message); }
+  });
+  document.addEventListener('sh:open-file', async (e) => {
+    openFilesPanel();
+    await files.refresh(app.convId);
+    files.open(e.detail);
   });
   wrap.addEventListener('scroll', () => { app.stick = nearBottom(); $('#to-bottom').hidden = app.stick; }, { passive: true });
   $('#to-bottom').addEventListener('click', () => { app.stick = true; scrollDown(true); });

@@ -4,6 +4,7 @@ openrouter.ai. It proves the money math (plan section 15, step 1) and every mode
 
     python scripts/live_test.py            # key check, model sync, one call, then all modes
     python scripts/live_test.py --quick    # key check, model sync, one call only
+    python scripts/live_test.py --artifacts  # documents, charts and answer length, on real models
 
 It uses OPENROUTER_API_KEY from the environment or the git-ignored .env file, and it prints what
 each run cost. Typical total spend on the cheap policy: well under 1 US cent... plus whatever the
@@ -11,6 +12,7 @@ cheapest brains charge, so read the printed cost line.
 """
 import asyncio
 import os
+import re
 import sys
 import tempfile
 from decimal import Decimal
@@ -20,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 os.environ.setdefault("BRAIN_POLICY", "cheap")
 
-from app import catalog, modes, wallet  # noqa: E402
+from app import catalog, modes, plans, wallet  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db import DB  # noqa: E402
 from app.harness import Harness, RunRequest  # noqa: E402
@@ -58,6 +60,7 @@ async def checks(quick: bool, llm: OpenRouter) -> int:
     db = DB(":memory:")
     catalog.seed(db)
     modes.seed(db)
+    plans.bind(db, modes.listing(db))   # the plan table decides which modes a user may run
     live = await llm.list_models()
     rep = catalog.sync_live(db, live)
     check("model list synced", len(live) > 50, f"{len(live)} live models, {rep['updated']} catalog rows matched, "
@@ -88,10 +91,49 @@ async def checks(quick: bool, llm: OpenRouter) -> int:
     if quick:
         return 1 if failures else 0
 
-    # 4. Every mode your plan allows, on cheap brains, through the real harness.
     db.run("INSERT INTO users(id,name,plan,auto_spend,created_at) VALUES('live','Live','pro',50,0)")
     wallet.add(db, "live", 3000, "live-test")
     h = Harness(db, llm)
+
+    # 4. Artifacts on real models: a document, a drawn chart, and the answer-length dial.
+    async def one(text: str, **kw) -> tuple[str, list[dict]]:
+        req = RunRequest(message=text, mode=kw.pop("mode", "normal"), confirm=True, effort="low",
+                         max_credits=kw.pop("max_credits", 25),
+                         tools=kw.pop("tools", ["chart", "diagram", "documents", "table"]), **kw)
+        tid, em = await h.start("live", req)
+        ev = [e async for e in em.stream()]
+        await h.drain()
+        body = ""
+        for e in ev:
+            if e["type"] == "text":
+                body = e["delta"] if e.get("replace") else body + e["delta"]
+        status = next((e for e in reversed(ev) if e["type"] == "run_done"), {}).get("status")
+        err = next((e["text"] for e in ev if e["type"] == "error"), "")
+        if status != "done" or err:
+            print(f"      [{status}] {err[:200]}")
+        return body, ev
+
+    ascii_art = re.compile(r"[\u2500-\u257f]|[+|][-=]{3,}[+|]|^\s*[/\\_|]{6,}\s*$", re.M)
+
+    body, ev = await one("Create a document that teaches me how AI learns. Three short sections.")
+    docs = [e for e in ev if e["type"] == "artifact" and e["kind"] == "doc"]
+    check("a document ask makes a real document file", bool(docs),
+          f"{docs[0]['data']['name']} ({docs[0]['data']['words']} words)" if docs else "no doc artifact")
+    check("the document answer has no ASCII art", not ascii_art.search(body), repr(body[:80]))
+
+    body, ev = await one("Show me a chart of how $1000 grows at 5% interest over 10 years.")
+    arts = [e["kind"] for e in ev if e["type"] == "artifact"]
+    check("a chart ask draws a picture, not ASCII art", bool({"chart", "svg"} & set(arts)) and not ascii_art.search(body),
+          f"artifacts={arts}")
+
+    short, _ = await one("Explain photosynthesis.", length="short", tools=[])
+    long_, _ = await one("Explain photosynthesis.", length="long", tools=[])
+    check("Long gives a longer answer than Short", len(long_) > len(short) * 1.2,
+          f"short={len(short)} chars, long={len(long_)} chars")
+    if "--artifacts" in sys.argv:
+        return 1 if failures else 0
+
+    # 5. Every mode your plan allows, on cheap brains, through the real harness.
     prompts = {
         "fast": "What is a noun? Give one example.",
         "normal": "Explain what interest is, then show how $1000 grows at 5% for 2 years.",

@@ -2,7 +2,8 @@
 // no secret state, so a reload (replay from the saved events) shows the same steps.
 import { h, $ } from './dom.js';
 import { renderMarkdown } from './markdown.js';
-import { renderChart, renderQuiz, renderSvg, renderFlashcards, renderTable } from './charts.js';
+setMarkdownRenderer((t) => renderMarkdown(t));
+import { renderChart, renderQuiz, renderSvg, renderFlashcards, renderTable, renderDoc, renderImage, setMarkdownRenderer } from './charts.js';
 
 const TOOL_NAMES = { calculator: 'Calculator', chart: 'Chart maker', diagram: 'Diagram', ppt_builder: 'PowerPoint builder', doc_builder: 'Word builder', web_search: 'Web search' };
 
@@ -20,6 +21,8 @@ export class ArtifactStore {
       else if (a.kind === 'svg') n = renderSvg(a.data.svg);
       else if (a.kind === 'flashcards') n = renderFlashcards(a.data);
       else if (a.kind === 'table') n = renderTable(a.data);
+      else if (a.kind === 'doc' || a.kind === 'slides') n = renderDoc(a.data, a.kind);
+      else if (a.kind === 'image') n = renderImage(a.data);
     } catch (e) { console.error('artifact failed', e); n = h('div', { class: 'notice', text: 'This picture could not be drawn.' }); }
     if (n) this.nodes.set(id, n);
     return n;
@@ -246,6 +249,12 @@ export class RunView {
       else if (ev.kind === 'more_credits') {
         if (ev.task_id) buttons.append(h('button', { class: 'btn primary', type: 'button', text: 'Continue with +40 credits', onclick: () => { if (this.onAsk({ kind: 'continue', task_id: ev.task_id, extra: 40 })) card.remove(); } }));
         else buttons.append(h('button', { class: 'btn primary', type: 'button', text: 'Run again with a higher cap', onclick: () => { if (this.onAsk({ kind: 'raise' })) card.remove(); } }));
+      } else if (ev.kind === 'image_model') {
+        for (const o of ev.options || []) {
+          buttons.append(h('button', { class: 'btn', type: 'button', text: `${o.name} ($${Number(o.price_out).toFixed(2)}/M out)`,
+            onclick: () => { card.remove(); this.onAsk({ kind: 'image_model', model: o.id }); } }));
+        }
+        if (!(ev.options || []).length) buttons.append(h('span', { class: 'muted small', text: 'Ask an admin to approve an image model.' }));
       } else if (ev.kind === 'topup') buttons.append(h('button', { class: 'btn primary', type: 'button', text: 'Add credits', onclick: () => this.onAsk({ kind: 'topup' }) }));
     }
     this.body.append(card);

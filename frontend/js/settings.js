@@ -8,7 +8,7 @@ export const ACCENTS = { teal: '#2a7f6f', blue: '#2f6fd1', violet: '#7a55c9', or
 
 export const DEFAULTS = {
   mode: 'auto', brains: {}, effort: 'auto', rounds: null, tries: null, cap: null,
-  tools: ['chart', 'diagram', 'documents', 'ppt', 'web'], skills: null, private: false,
+  tools: ['chart', 'diagram', 'documents', 'ppt', 'flashcards', 'table', 'web'], skills: null, private: false, length: 'auto', image_model: null,
   team: {}, teacher_enabled: false, teacher_model: null,
 };
 
@@ -135,7 +135,12 @@ export function buildSettings(boot, S, { onChange, focus, display, onDisplay }) 
       sliders.append(h('p', { class: 'muted tiny', text: 'The run stops at this limit and keeps the best answer so far. Unused credits come back.' }));
       const priv = h('input', { type: 'checkbox', id: 'sw-priv', checked: S.private || null });
       priv.addEventListener('change', () => { S.private = priv.checked; onChange(); });
-      return section('Effort and limits', 'Effort is how much scrap paper the AI may use before answering. More effort costs more and takes longer. It only helps on hard questions.',
+      const lengths = boot.lengths || [{ id: 'auto', label: 'Auto' }, { id: 'short', label: 'Short' }, { id: 'medium', label: 'Normal' }, { id: 'long', label: 'Long' }];
+      const lenSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Response length' }, lengths.map((l) =>
+        h('button', { type: 'button', text: l.label, 'aria-pressed': String((S.length || 'auto') === l.id), onclick: () => set({ length: l.id }) })));
+      return section('Effort and limits', 'Effort is how much scrap paper the AI may use before answering. Length is how much room the answer itself gets.',
+        h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Response length' }), lenSeg,
+          h('p', { class: 'muted tiny', text: 'If an answer still hits the limit, it is finished in a second pass and you are told.' })),
         h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Effort' }), seg), sliders,
         h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Privacy' }), h('label', { class: 'switch', for: 'sw-priv' }, priv, h('span', null, 'Private route: only hosts that do not keep or train on prompts')),
           h('p', { class: 'muted tiny', text: 'Web search sits outside this setting. Private routes may cost more or have fewer brains.' })));
@@ -155,8 +160,19 @@ export function buildSettings(boot, S, { onChange, focus, display, onDisplay }) 
         cb.addEventListener('change', () => { const cur = new Set(S.skills ?? boot.skills.map((x) => x.name)); cb.checked ? cur.add(sk.name) : cur.delete(sk.name); S.skills = [...cur]; onChange(); });
         skillBox.append(h('label', { class: 'switch', for: `sk-${sk.name}`, title: sk.description }, cb, h('span', null, h('b', { text: sk.name }), ' ', h('span', { class: 'muted small', text: sk.description.split('. ')[0] }))));
       }
-      return section('Tools and skills', 'Tools let the AI make charts, files and searches. Skills are recipe cards it opens only when a task needs them.',
+      const imgModels = boot.image_models || [];
+      const imgSel = h('select', { class: 'select', 'aria-label': 'Image model' },
+        h('option', { value: '', text: imgModels.length ? 'Not chosen: I will ask before drawing' : 'No image model approved yet' }),
+        imgModels.map((m) => h('option', { value: m.id, text: `${m.name} (${m.lab}) · $${Number(m.price_out).toFixed(2)} per 1M out` })));
+      imgSel.value = S.image_model || boot.image_model || '';
+      imgSel.addEventListener('change', async () => {
+        S.image_model = imgSel.value || null; onChange();
+        try { await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image_model: imgSel.value || null }) }); } catch { /* saved on the next message anyway */ }
+      });
+      return section('Tools and skills', 'Tools let the AI make charts, documents, pictures and searches. Skills are recipe cards it opens only when a task needs them.',
         h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Tools for this chat' }), toolBox),
+        h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Image model' }), imgSel,
+          h('p', { class: 'muted tiny', text: 'Generated pictures cost real money per image, so nothing is drawn until you pick a model. Turn on the "Generated images" tool above to let the AI ask for one.' })),
         h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Skills' }), skillBox));
     },
 
@@ -184,7 +200,7 @@ export function buildSettings(boot, S, { onChange, focus, display, onDisplay }) 
     if (id === 'planning') return teamName(S.team);
     if (id === 'research') { const r = S.team?.researchers; return r?.enabled === false || r?.count === 0 ? 'Off' : r?.count ? `${r.count} on` : 'Auto'; }
     if (id === 'build') return S.teacher_enabled ? 'Teaching on' : 'Direct answers';
-    if (id === 'limits') return (boot.efforts.find((e) => e.id === S.effort)?.label || 'Auto');
+    if (id === 'limits') { const e = boot.efforts.find((x) => x.id === S.effort)?.label || 'Auto'; const l = S.length && S.length !== 'auto' ? ` / ${S.length}` : ''; return e + l; }
     if (id === 'tools') return `${S.tools.length} on`;
     return '';
   }
