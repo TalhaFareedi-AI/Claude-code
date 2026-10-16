@@ -146,3 +146,6 @@ Run `python -m pytest` (192 tests), then `python backend/tests/demo_server.py` a
 
 Browser checks: `node scripts/layout_ui_check.cjs` (24, start the server with `UNLOCK_ALL=1`), `scripts/ui_check.cjs` (19),
 `scripts/platform_ui_check.cjs` (23), `scripts/team_ui_check.cjs` (15). Unit tests: `python -m pytest` (194).
+
+## Deploy
+See [DEPLOY.md](DEPLOY.md): Dockerfile, docker-compose.yml and a Render blueprint (render.yaml) are included. Use `UNLOCK_ALL=admin` on a public site.

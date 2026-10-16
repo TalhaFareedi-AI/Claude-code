@@ -426,3 +426,22 @@ async def test_without_unlock_all_the_plan_limits_still_apply(api, db):
         boot = (await c.get("/api/bootstrap", headers={"x-user-id": "u_plain01"})).json()
         assert boot["user"]["plan"] == "free" and not boot["unlock_all"]
         assert not next(m for m in boot["modes"] if m["id"] == "council")["allowed"]
+
+
+# ---------------------------------------------------------------- deployment
+async def test_healthz_is_open_and_checks_the_database(api):
+    async with client(api) as c:
+        r = await c.get("/healthz")
+    assert r.status_code == 200 and r.json() == {"ok": True}
+
+
+async def test_unlock_admin_gives_only_the_admin_every_feature(api, db, monkeypatch):
+    monkeypatch.setattr(settings, "unlock_admin", True)
+    accounts.ensure_admin(db, "boss@example.com", "admin pass 123")
+    async with client(api) as admin, client(api) as visitor:
+        await admin_login(admin, db)
+        me = (await admin.get("/api/bootstrap")).json()
+        assert me["user"]["plan"] == "owner" and all(m["allowed"] for m in me["modes"]) and me["wallet"]["balance"] >= 100000
+        v = (await visitor.get("/api/bootstrap", headers={"x-user-id": "u_visit01"})).json()
+        assert v["user"]["plan"] == "free" and not next(m for m in v["modes"] if m["id"] == "council")["allowed"]
+        assert v["wallet"]["balance"] == 100                       # a public visitor gets no free credits

@@ -30,7 +30,7 @@ def _app_secret() -> str:
     if configured and configured != "dev-secret-change-me":
         return configured
     # Keep anonymous sessions valid across restarts without a public default signing key.
-    path = ROOT / "data" / ".app-secret"
+    path = Path(_env("DB_PATH", str(ROOT / "data" / "app.db"))).parent / ".app-secret"  # lives on the data volume
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -68,7 +68,9 @@ class Settings:
         # test = a purchase is paid at once (no real money). manual = pending until an admin marks it paid.
         self.payment_provider = _env("PAYMENT_PROVIDER", "test" if _env("DEV_MODE", "0") == "1" else "manual")
         # Owner mode: every user gets the Owner plan (all modes, brains, effort, huge limits). For a one-person setup.
+        # UNLOCK_ALL=1: everyone (only for your own computer). UNLOCK_ALL=admin: only admin accounts (safe on a public site).
         self.unlock_all = _env("UNLOCK_ALL", "0") == "1"
+        self.unlock_admin = _env("UNLOCK_ALL", "0").lower() == "admin"
         self.app_title = _env("APP_TITLE", "Study Harness")
 
 

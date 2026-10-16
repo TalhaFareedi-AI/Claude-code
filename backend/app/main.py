@@ -119,6 +119,16 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
                                                    "script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
         return resp
 
+    @app.get("/healthz")
+    def healthz():
+        """For the host's health check: confirms the server is up and the database answers."""
+        db.scalar("SELECT 1")
+        return {"ok": True}
+
+    if settings.unlock_all and not settings.dev_mode:
+        print("WARNING: UNLOCK_ALL=1 gives EVERY visitor all features and 100,000 free credits on your OpenRouter key. "
+              "On a public site use UNLOCK_ALL=admin.")
+
     # ---- who is this -------------------------------------------------------------------
     def who(request: Request, response: Response | None = None) -> dict:
         session_user = accounts.session_user(db, request.cookies.get("sid"))
