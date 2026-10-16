@@ -158,7 +158,7 @@ def install(app, db, harness, who) -> None:
     @app.put("/api/memory/{mid}")
     def memory_edit(request: Request, mid: int, body: MemoryPatch):
         user = who(request)
-        row = memory.update(db, user["id"], mid, **body.model_dump(exclude_none=True))
+        row = memory.update(db, user["id"], mid, **(body.model_dump(exclude_none=True) if hasattr(body, 'model_dump') else body.dict(exclude_none=True)))
         if not row:
             raise HTTPException(404, "No such memory, or the text looks like a secret.")
         return row

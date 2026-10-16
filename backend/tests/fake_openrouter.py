@@ -17,6 +17,21 @@ RECIPE = {"chart": "line", "title": "How savings grow",
                      {"id": "r", "label": "Interest %", "type": "slider", "min": 0, "max": 20, "step": 0.5, "value": 5}],
           "x": {"label": "Year", "from": 0, "to": 10}, "lines": [{"name": "Money", "formula": "P*(1+r/100)^x"}]}
 SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 360"><rect x="10" y="10" width="100" height="50" fill="none" stroke="black"/><text x="20" y="40">Sun</text><script>alert(1)</script></svg>'
+CNN_SPEC = {
+    "title": "Small CNN for handwritten digits",
+    "nodes": [
+        {"id": "in", "label": "Input image", "input": "a photo of one digit", "process": "turn pixels into numbers", "output": "1 x 28 x 28"},
+        {"id": "c1", "label": "Conv 3x3, 16 filters, ReLU", "input": "1 x 28 x 28", "process": "find edges and strokes", "output": "16 x 28 x 28"},
+        {"id": "p1", "label": "Max pool 2x2", "input": "16 x 28 x 28", "process": "keep strongest value in each 2x2 square", "output": "16 x 14 x 14"},
+        {"id": "c2", "label": "Conv 3x3, 32 filters, ReLU", "input": "16 x 14 x 14", "process": "find shapes like loops and lines", "output": "32 x 14 x 14"},
+        {"id": "p2", "label": "Max pool 2x2", "input": "32 x 14 x 14", "process": "shrink again", "output": "32 x 7 x 7"},
+        {"id": "fc", "label": "Flatten + Dense", "input": "32 x 7 x 7 = 1,568 numbers", "process": "weigh all the features", "output": "10 scores"},
+        {"id": "out", "label": "Softmax", "input": "10 scores", "process": "turn scores into chances", "output": "chance of each digit, 0 to 9"},
+    ],
+    "edges": [["in", "c1"], ["c1", "p1"], ["p1", "c2"], ["c2", "p2"], ["p2", "fc"], ["fc", "out"]],
+    "explanation": "Each convolution layer finds features and each pooling layer halves the width and height.",
+    "options": [{"name": "2-Layer CNN", "cost": "Low", "risk": "Low", "why": "Fast and accurate on 28x28 digits."}],
+}
 
 
 def as_text(content) -> str:
@@ -63,8 +78,31 @@ class FakeOpenRouter:
         if "task router" in sys:
             return json.dumps({"intent": "teach", "needs": [], "complexity": "medium", "make_plan": False})
         if "Restate a user's task precisely" in sys:
-            return json.dumps({"goal": user[:400], "enhanced_prompt": user[:1000], "constraints": [],
+            needs_arch = any(w in user.lower() for w in ("cnn", "transformer", "mamba", "d3 diagram", "architecture"))
+            return json.dumps({"goal": user[:400], "enhanced_prompt": user[:1000], "teach_level": "light",
+                               "needs_architecture": needs_arch, "constraints": [],
                                "missing": [], "research": False, "files": False, "queries": []})
+        if "Rewrite the user's task into a clear" in sys:
+            return json.dumps({"enhanced_prompt": user[:1000], "next_buttons": ["Show a graph", "Quiz me", "Explain simpler"]})
+        if "Architecture agent (section 16)" in sys:
+            return json.dumps(CNN_SPEC)
+        if "critic sub-agent (section 16)" in sys:
+            return json.dumps({"role": "math", "verdict": "pass", "confidence": "high",
+                               "finding": "All calculations and steps verified.", "evidence": "28 / 2 = 14", "fix": ""})
+        if "harness editor in the Recursive Harness" in sys:
+            return json.dumps({"scope": "general", "observation": "Re-verify section numbers and table outputs.",
+                               "edits": {"system_rule": "Include at least one verified number per section.",
+                                         "guardrail": "Re-open and verify generated tables."}})
+        if "Composer agent in the Recursive Harness" in sys:
+            return json.dumps({"decision": "merge", "observation": "Both general and topic probe runs improved accuracy.",
+                               "system_rule": "Include at least one verified number per section.",
+                               "guardrail": "Re-open and verify generated tables.",
+                               "tool_guidance": "Use calculator for numbers over 3 digits.",
+                               "summary": "Merged general verification rule with topic rule into H1."})
+        if "Reflector agent in the Recursive Harness" in sys:
+            return json.dumps({"write_lesson": True, "topic": "reports",
+                               "text": "Every section needs at least one verified number with a source.",
+                               "evidence": "Probe run passed all checks.", "scope": "personal"})
         if "shortest plan" in sys or "bounded agent team" in sys:   # the mode planner and the team planner
             return json.dumps({"steps": [
                 {"title": "Work out the numbers", "kind": "calculate", "detail": "compute"},
@@ -139,6 +177,10 @@ class FakeOpenRouter:
             text += '```quiz\n{"questions":[{"q":"What do plants eat?","options":["Light","Rocks"],"answer":0,"why":"They use sunlight."}]}\n```\n\n'
         if "diagram" in low and "svg" in sys:
             text += "```svg\n" + SVG + "\n```\n\n"
+        if "d3_diagram" in low or "cnn" in low:
+            text += "```d3_diagram\n" + json.dumps(CNN_SPEC) + "\n```\n\n"
+        if "waveform" in low or "science_plot" in low:
+            text += '```science_plot\n{"kind":"waveform","title":"5 Hz Sine Wave and FFT Spectrum","freq":5,"amp":1,"duration":1}\n```\n\n'
         if self.image_block or ("write ONE fenced block tagged image" in sys and "draw" in low):
             text += "```image\nA labelled cross-section of a leaf, flat vector style, white background\n```\n\n"
         if self.doc_block or ("ONE fenced block tagged doc" in sys and "document" in low):

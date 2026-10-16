@@ -1,4 +1,4 @@
-"""SQLite storage. Same tables as section 10; swap for PostgreSQL later."""
+"""SQLite storage. Same tables as section 10 and section 18; swap for PostgreSQL later."""
 import json
 import sqlite3
 import threading
@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS model_catalog(
 CREATE TABLE IF NOT EXISTS model_prices(
   id INTEGER PRIMARY KEY AUTOINCREMENT, model_id TEXT, price_in REAL, price_out REAL,
   started_at REAL);
+CREATE TABLE IF NOT EXISTS action_prices(
+  action TEXT PRIMARY KEY, credits INTEGER, updated_at REAL);
+CREATE TABLE IF NOT EXISTS eval_results(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, prompt_name TEXT, version INTEGER,
+  question_id TEXT, score REAL, cost_usd REAL, created_at REAL);
 CREATE TABLE IF NOT EXISTS run_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, seq INTEGER, type TEXT, data TEXT,
   created_at REAL);
@@ -67,6 +72,18 @@ CREATE TABLE IF NOT EXISTS memories(
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, kind TEXT, content TEXT, importance INTEGER DEFAULT 3,
   source TEXT, conversation_id TEXT, pinned INTEGER DEFAULT 0, use_count INTEGER DEFAULT 0,
   last_used_at REAL, created_at REAL, updated_at REAL, deleted INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS harness_versions(
+  id TEXT PRIMARY KEY, user_id TEXT, parent_id TEXT, name TEXT, files TEXT,
+  created_by TEXT, active INTEGER DEFAULT 1, created_at REAL);
+CREATE TABLE IF NOT EXISTS improvement_records(
+  id TEXT PRIMARY KEY, user_id TEXT, task_id TEXT, base_harness TEXT, new_harness TEXT,
+  k INTEGER DEFAULT 1, edits TEXT, evidence TEXT, compose_decision TEXT, result_summary TEXT,
+  credits INTEGER DEFAULT 0, undone INTEGER DEFAULT 0, created_at REAL);
+CREATE TABLE IF NOT EXISTS lessons(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, scope TEXT DEFAULT 'personal',
+  topic TEXT DEFAULT 'general', text TEXT, evidence TEXT, helped_count INTEGER DEFAULT 0,
+  hurt_count INTEGER DEFAULT 0, review_status TEXT DEFAULT 'approved',
+  created_at REAL, updated_at REAL);
 CREATE INDEX IF NOT EXISTS ix_activity_user ON activity(user_id, id);
 CREATE INDEX IF NOT EXISTS ix_memories_user ON memories(user_id, deleted);
 CREATE INDEX IF NOT EXISTS ix_purchases_user ON purchases(user_id);
@@ -76,6 +93,7 @@ CREATE INDEX IF NOT EXISTS ix_events_task ON run_events(task_id, seq);
 CREATE INDEX IF NOT EXISTS ix_ledger_user ON credit_ledger(user_id);
 CREATE INDEX IF NOT EXISTS ix_usage_task ON usage_events(task_id);
 CREATE INDEX IF NOT EXISTS ix_msgs_conv ON messages(conversation_id, id);
+CREATE INDEX IF NOT EXISTS ix_lessons_scope ON lessons(scope, review_status);
 """
 
 

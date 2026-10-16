@@ -70,8 +70,10 @@ export function renderChart(recipe) {
     controls.querySelectorAll('input').forEach((el) => { el.value = values[el.dataset.id]; readouts[el.dataset.id].textContent = fmtNum(values[el.dataset.id]); });
     draw();
   } });
+  const badgeText = recipe.badge || (isCat && !inputs.length ? 'Chart from your data' : 'Computed plot');
+  const headRow = h('div', { class: 'art-head' }, h('h3', { text: recipe.title }), h('span', { class: 'visual-badge', text: badgeText }));
   const root = h('div', { class: 'art chart', role: 'group', 'aria-label': `Chart: ${recipe.title}` },
-    h('h3', { text: recipe.title }), inputs.length ? controls : null, box, legend, note, inputs.length ? reset : null);
+    headRow, inputs.length ? controls : null, box, legend, note, inputs.length ? reset : null);
   box.append(tip);
 
   let raf = 0;
@@ -351,4 +353,114 @@ export function renderImage(d) {
     .then(({ url }) => { img.src = url; })
     .catch(() => { box.replaceChildren(h('p', { class: 'muted small', text: 'The picture is no longer available.' })); });
   return box;
+}
+
+
+// Interactive D3-style Architecture Diagram (section 5 & section 16, pages 23, 72-73).
+// Click any component box to inspect its Input, Process, and Output card; zoom and pan to explore.
+export function renderD3Diagram(spec) {
+  const nodes = spec.nodes || [];
+  const edges = spec.edges || [];
+  let selectedId = nodes[0]?.id || null;
+  let scale = 1;
+
+  const cols = Math.min(4, Math.max(2, nodes.length));
+  const rows = Math.ceil(nodes.length / cols);
+  const W = Math.max(640, cols * 185 + 40);
+  const H = Math.max(210, rows * 105 + 40);
+
+  const pos = {};
+  nodes.forEach((n, idx) => {
+    const r = Math.floor(idx / cols);
+    const c = idx % cols;
+    pos[n.id] = { x: 24 + c * 180, y: 24 + r * 96 };
+  });
+
+  const inspector = h('div', { class: 'd3-inspector', 'aria-live': 'polite' });
+  const stageWrap = h('div', { class: 'd3-stage' });
+
+  function paintInspector() {
+    const cur = nodes.find((n) => n.id === selectedId) || nodes[0];
+    if (!cur) return;
+    inspector.replaceChildren(
+      h('div', { class: 'd3-card-title' }, h('b', { text: cur.label }), h('span', { class: 'muted tiny', text: `Node: ${cur.id}` })),
+      h('div', { class: 'd3-io-grid' },
+        h('div', { class: 'd3-io' }, h('span', { class: 'muted tiny', text: 'Input' }), h('div', { text: cur.input || '–' })),
+        h('div', { class: 'd3-io' }, h('span', { class: 'muted tiny', text: 'Inside process' }), h('div', { text: cur.process || '–' })),
+        h('div', { class: 'd3-io' }, h('span', { class: 'muted tiny', text: 'Output' }), h('div', { text: cur.output || '–' }))));
+  }
+
+  function drawGraph() {
+    const rootSvg = svg('svg', {
+      class: 'd3-svg',
+      viewBox: `0 0 ${W} ${H}`,
+      style: `transform: scale(${scale}); transform-origin: top left;`,
+      role: 'img',
+      'aria-label': spec.title || 'Architecture diagram',
+    });
+
+    const defs = svg('defs');
+    const marker = svg('marker', { id: 'd3-arrow', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '6', markerHeight: '6', orient: 'auto-start-reverse' });
+    marker.append(svg('path', { d: 'M 0 1 L 10 5 L 0 9 z', fill: 'var(--accent)' }));
+    defs.append(marker);
+    rootSvg.append(defs);
+
+    for (const [src, dst] of edges) {
+      const p1 = pos[src], p2 = pos[dst];
+      if (!p1 || !p2) continue;
+      rootSvg.append(svg('line', {
+        x1: p1.x + 75, y1: p1.y + 34, x2: p2.x + 75, y2: p2.y + 34,
+        stroke: 'var(--accent)', 'stroke-width': 2, 'marker-end': 'url(#d3-arrow)', opacity: 0.75,
+      }));
+    }
+
+    for (const n of nodes) {
+      const p = pos[n.id];
+      const active = n.id === selectedId;
+      const g = svg('g', { class: 'd3-node' + (active ? ' active' : ''), style: 'cursor:pointer', tabindex: '0', role: 'button', 'aria-label': n.label });
+      g.append(
+        svg('rect', {
+          x: p.x, y: p.y, width: 152, height: 68, rx: 10,
+          fill: active ? 'var(--accent-soft, #e6f4f1)' : 'var(--panel, #ffffff)',
+          stroke: active ? 'var(--accent, #2a7f6f)' : 'var(--border, #cbd5e1)',
+          'stroke-width': active ? 2.5 : 1.5,
+        }),
+        svg('text', { x: p.x + 10, y: p.y + 22, 'font-weight': '700', 'font-size': '11.5', fill: 'var(--fg, #0f172a)' }, n.label.slice(0, 22)),
+        svg('text', { x: p.x + 10, y: p.y + 40, 'font-size': '10', fill: 'var(--muted, #64748b)' }, `In: ${(n.input || '').slice(0, 22)}`),
+        svg('text', { x: p.x + 10, y: p.y + 55, 'font-size': '10', fill: 'var(--accent, #2a7f6f)' }, `Out: ${(n.output || '').slice(0, 22)}`),
+      );
+      g.addEventListener('click', () => { selectedId = n.id; paintInspector(); drawGraph(); });
+      rootSvg.append(g);
+    }
+
+    stageWrap.replaceChildren(rootSvg);
+  }
+
+  paintInspector();
+  drawGraph();
+
+  const zoomRow = h('div', { class: 'btn-row' },
+    h('button', { type: 'button', class: 'btn small', text: '＋ Zoom in', onclick: () => { scale = Math.min(1.5, +(scale + 0.15).toFixed(2)); drawGraph(); } }),
+    h('button', { type: 'button', class: 'btn small', text: '− Zoom out', onclick: () => { scale = Math.max(0.7, +(scale - 0.15).toFixed(2)); drawGraph(); } }),
+    h('button', { type: 'button', class: 'btn small', text: 'Reset view', onclick: () => { scale = 1; drawGraph(); } }),
+    h('span', { class: 'muted tiny', text: 'Click any component box to inspect its inputs, processing, and outputs.' }));
+
+  return h('div', { class: 'art d3-diagram', role: 'group', 'aria-label': `Architecture diagram: ${spec.title}` },
+    h('div', { class: 'art-head' }, h('h3', { text: spec.title || 'Interactive Architecture Diagram' }),
+      h('span', { class: 'visual-badge', text: spec.badge || 'Interactive architecture diagram' })),
+    stageWrap,
+    zoomRow,
+    inspector,
+    spec.explanation ? h('p', { class: 'small muted', text: spec.explanation }) : null);
+}
+
+// Python Scientific Plot (section 5, page 23): waveforms, FFT spectra, and research curves.
+export function renderSciencePlot(data) {
+  const wrap = h('div', { class: 'art science-plot', role: 'group', 'aria-label': `Scientific plot: ${data.title}` },
+    h('div', { class: 'art-head' }, h('h3', { text: data.title || 'Scientific Plot' }),
+      h('span', { class: 'visual-badge', text: data.badge || 'Computed plot' })));
+  if (data.svg) {
+    wrap.append(renderSvg(data.svg));
+  }
+  return wrap;
 }

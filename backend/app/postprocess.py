@@ -1,8 +1,12 @@
-"""Check + teacher layer (section 3, steps 7 and 8).
+"""Check + teacher layer (section 3, steps 7 and 8; sections 5, 6, 7, 16).
 
 Takes the model's raw text and:
   - fills {{calc: ...}} with exact numbers (no mental math)
-  - checks chart recipes, SVG drawings and quizzes in code, and repairs them (at most 2 tries)
+  - checks chart recipes, D3 architecture diagrams, Python science plots, SVG drawings,
+    quizzes, flashcards, and tables in code, and repairs them (at most 2 tries)
+  - attaches truthfulness badges ('Chart from your data', 'Computed plot',
+    'AI illustration (not real data)', 'Interactive architecture diagram')
+  - checks LaTeX formulas ($$ ... $$ and \\( ... \\)) for balanced delimiters
   - pulls out the 2 or 3 next-step buttons
 Nothing in the AI's text is trusted: every block is validated before the screen draws it.
 """
@@ -12,10 +16,10 @@ import uuid
 from . import catalog, charts, prompts, workspace
 from .db import jdump, now
 from .openrouter import OpenRouterError
-from .tools import calc as calc_tool, diagram
+from .tools import calc as calc_tool, diagram, pdf_builder, science_plot
 
 NEXT = re.compile(r"\[\[\s*next\s*:\s*(.+?)\]\]", re.I | re.S)
-BLOCK = re.compile(r"```(chart|svg|quiz|flashcards|table|image)[ \t]*\n(.*?)```", re.S)
+BLOCK = re.compile(r"```(chart|svg|quiz|flashcards|table|image|d3_diagram|d3|science_plot)[ \t]*\n(.*?)```", re.S)
 # A document keeps its title on the fence line, so a long markdown body needs no JSON escaping.
 DOC_BLOCK = re.compile(r"```(doc|slides)[ \t]*(?:title=\"([^\"\n]{1,120})\")?[ \t]*\n(.*?)\n?```", re.S)
 DOC_MAX_CHARS = 200_000
@@ -97,6 +101,99 @@ def validate_table(d) -> dict:
     return {"title": str(d.get("title", "Table"))[:80], "columns": clean_cols, "rows": clean_rows}
 
 
+def validate_d3_diagram(d) -> dict:
+    """Validate an interactive D3 architecture diagram spec (section 5 & section 16, page 73)."""
+    if not isinstance(d, dict):
+        raise ValueError("d3_diagram must be a JSON object")
+    raw_nodes = d.get("nodes")
+    if not isinstance(raw_nodes, list) or not 2 <= len(raw_nodes) <= 16:
+        raise ValueError("d3_diagram needs between 2 and 16 nodes")
+    nodes, ids = [], set()
+    for idx, n in enumerate(raw_nodes, 1):
+        if not isinstance(n, dict):
+            raise ValueError("each node must be an object")
+        nid = str(n.get("id") or f"n{idx}").strip()[:32]
+        label = str(n.get("label") or n.get("title") or nid).strip()[:100]
+        if not nid or nid in ids:
+            nid = f"n{idx}"
+        ids.add(nid)
+        nodes.append({
+            "id": nid,
+            "label": label,
+            "input": str(n.get("input") or "Input data")[:200],
+            "process": str(n.get("process") or label)[:240],
+            "output": str(n.get("output") or "Processed output")[:200],
+        })
+    raw_edges = d.get("edges") or []
+    edges = []
+    if isinstance(raw_edges, list):
+        for e in raw_edges[:32]:
+            if isinstance(e, (list, tuple)) and len(e) >= 2:
+                src, dst = str(e[0]).strip(), str(e[1]).strip()
+                if src in ids and dst in ids and src != dst:
+                    edges.append([src, dst])
+            elif isinstance(e, dict):
+                src, dst = str(e.get("from") or e.get("source") or "").strip(), str(e.get("to") or e.get("target") or "").strip()
+                if src in ids and dst in ids and src != dst:
+                    edges.append([src, dst])
+    if not edges and len(nodes) >= 2:
+        edges = [[nodes[i]["id"], nodes[i + 1]["id"]] for i in range(len(nodes) - 1)]
+    options = []
+    for opt in (d.get("options") or [])[:4]:
+        if isinstance(opt, dict) and opt.get("name"):
+            options.append({
+                "name": str(opt["name"])[:80],
+                "cost": str(opt.get("cost") or "Medium")[:40],
+                "risk": str(opt.get("risk") or "Low")[:40],
+                "why": str(opt.get("why") or "")[:200],
+            })
+    return {
+        "title": str(d.get("title") or "Architecture Diagram")[:100],
+        "nodes": nodes,
+        "edges": edges,
+        "explanation": str(d.get("explanation") or "")[:1200],
+        "options": options,
+        "badge": "Interactive architecture diagram",
+    }
+
+
+def d3_spec_to_svg(spec: dict) -> str:
+    """Render an architecture spec to a clean static SVG file so PPTX/DOCX and workspace downloads have a sharp image."""
+    nodes = spec["nodes"]
+    cols = min(4, len(nodes))
+    rows = (len(nodes) + cols - 1) // cols
+    W = max(640, cols * 185 + 40)
+    H = max(220, rows * 110 + 60)
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" font-family="system-ui, sans-serif" font-size="11">',
+        f'<rect width="{W}" height="{H}" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>',
+        f'<text x="24" y="28" font-size="14" font-weight="700" fill="#0f172a">{_esc_xml(spec["title"])}</text>',
+    ]
+    pos = {}
+    for idx, n in enumerate(nodes):
+        r, c = divmod(idx, cols)
+        x = 24 + c * 180
+        y = 48 + r * 100
+        pos[n["id"]] = (x, y)
+    for src, dst in spec["edges"]:
+        if src in pos and dst in pos:
+            x1, y1 = pos[src]
+            x2, y2 = pos[dst]
+            parts.append(f'<line x1="{x1 + 75}" y1="{y1 + 32}" x2="{x2 + 75}" y2="{y2 + 32}" stroke="#2a7f6f" stroke-width="2"/>')
+    for n in nodes:
+        x, y = pos[n["id"]]
+        parts.append(f'<rect x="{x}" y="{y}" width="150" height="64" rx="8" fill="#ffffff" stroke="#2a7f6f" stroke-width="1.8"/>')
+        parts.append(f'<text x="{x + 10}" y="{y + 22}" font-weight="700" fill="#0f172a">{_esc_xml(n["label"][:22])}</text>')
+        parts.append(f'<text x="{x + 10}" y="{y + 40}" font-size="9.5" fill="#475569">In: {_esc_xml(n["input"][:22])}</text>')
+        parts.append(f'<text x="{x + 10}" y="{y + 54}" font-size="9.5" fill="#1e6b5c">Out: {_esc_xml(n["output"][:22])}</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _esc_xml(s: str) -> str:
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
 def slide_count(body: str) -> int:
     return len([p for p in re.split(r"(?m)^---[ \t]*$", body) if p.strip()])
 
@@ -162,7 +259,11 @@ async def build_chart(ctx, raw: str) -> dict | None:
     from .harness import parse_json
     for attempt in range(MAX_FIX + 1):
         try:
-            return charts.validate(parse_json(raw))
+            rec = charts.validate(parse_json(raw))
+            # Attach truthfulness badge (section 5, page 23-24)
+            is_cat_static = rec["chart"] in ("bar", "pie") and not rec.get("inputs")
+            rec["badge"] = "Chart from your data" if is_cat_static else "Computed plot"
+            return rec
         except (charts.RecipeError, ValueError) as e:
             if attempt == MAX_FIX:
                 ctx.notices.append("I could not make the chart work, so I left it out.")
@@ -184,6 +285,59 @@ async def handle_block(ctx, kind: str, body: str) -> str:
         if not rec:
             return ""
         return f"\n\n[[artifact:{new_artifact(ctx, 'chart', rec)['id']}]]\n\n"
+    if kind in ("d3_diagram", "d3"):
+        raw = body
+        for attempt in range(MAX_FIX + 1):
+            try:
+                spec = validate_d3_diagram(parse_json(raw))
+                art = new_artifact(ctx, "d3_diagram", spec)
+                try:
+                    svg_txt = d3_spec_to_svg(spec)
+                    d = workspace.task_dir(ctx.user["id"], ctx.task["id"])
+                    p = d / "out" / f"architecture-{len(ctx.files) + 1}.svg"
+                    workspace.check_storage(ctx.db, ctx.user["id"], ctx.plan, len(svg_txt))
+                    p.write_text(svg_txt)
+                    rec = workspace.register(ctx.db, ctx.user["id"], ctx.task["id"], p, "svg", ctx.plan)
+                    ctx.files.append(rec)
+                    ctx.emit("file_created", file=rec)
+                except Exception:
+                    pass
+                return f"\n\n[[artifact:{art['id']}]]\n\n"
+            except (ValueError, KeyError, AttributeError, TypeError) as e:
+                if attempt == MAX_FIX:
+                    ctx.notices.append("The interactive architecture diagram could not be validated, so I left it out.")
+                    return ""
+                try:
+                    raw = await repair(ctx, "d3_diagram", raw, str(e))
+                except Exception:
+                    return ""
+    if kind == "science_plot":
+        raw = body
+        for attempt in range(MAX_FIX + 1):
+            try:
+                data = science_plot.compute_series(parse_json(raw))
+                svg_txt = science_plot.render_svg(data)
+                data["svg"] = svg_txt
+                art = new_artifact(ctx, "science_plot", data)
+                try:
+                    d = workspace.task_dir(ctx.user["id"], ctx.task["id"])
+                    p = d / "out" / f"science-plot-{len(ctx.files) + 1}.svg"
+                    workspace.check_storage(ctx.db, ctx.user["id"], ctx.plan, len(svg_txt))
+                    p.write_text(svg_txt)
+                    rec = workspace.register(ctx.db, ctx.user["id"], ctx.task["id"], p, "svg", ctx.plan)
+                    ctx.files.append(rec)
+                    ctx.emit("file_created", file=rec)
+                except Exception:
+                    pass
+                return f"\n\n[[artifact:{art['id']}]]\n\n"
+            except Exception as e:
+                if attempt == MAX_FIX:
+                    ctx.notices.append("The scientific plot could not be computed, so I left it out.")
+                    return ""
+                try:
+                    raw = await repair(ctx, "science_plot", raw, str(e))
+                except Exception:
+                    return ""
     if kind == "quiz":
         raw = body
         for attempt in range(MAX_FIX + 1):
@@ -246,7 +400,7 @@ async def image_artifact(ctx, prompt: str) -> str:
     ctx.images_made += 1
     ctx.files.append(rec)
     art = new_artifact(ctx, "image", {"file_id": rec["id"], "name": rec["name"], "prompt": prompt.strip()[:300],
-                                      "model": model["name"]})
+                                      "model": model["name"], "badge": "AI illustration (not real data)"})
     ctx.emit("file_created", file=rec)
     ctx.emit("tool_result", tool="image", ok=True, summary=rec["name"], cost=ctx.meter.credits)
     return f"\n\n[[artifact:{art['id']}]]\n\n"
@@ -262,7 +416,7 @@ async def svg_artifact(ctx, raw: str, name: str = "diagram") -> str:
                 ctx.notices.append("I could not draw the picture safely, so I left it out.")
                 return ""
             raw = await repair(ctx, "svg", raw, str(e))
-    art = new_artifact(ctx, "svg", {"svg": clean})
+    art = new_artifact(ctx, "svg", {"svg": clean, "badge": "Diagram"})
     try:
         d = workspace.task_dir(ctx.user["id"], ctx.task["id"])
         n = len([f for f in ctx.files if f["name"].startswith(name)]) + 1
@@ -275,6 +429,17 @@ async def svg_artifact(ctx, raw: str, name: str = "diagram") -> str:
     except workspace.PathEscape:
         pass
     return f"\n\n[[artifact:{art['id']}]]\n\n"
+
+
+def check_latex(text: str) -> str:
+    """Ensure $$ display math and \\( ... \\) inline math blocks have balanced closing delimiters (section 7, page 30)."""
+    if text.count("$$") % 2 == 1:
+        text = text + "\n$$"
+    opens = len(re.findall(r"\\\(", text))
+    closes = len(re.findall(r"\\\)", text))
+    if opens > closes:
+        text = text + (r" \)" * (opens - closes))
+    return text
 
 
 async def finalize(ctx, text: str) -> tuple[str, list[str], list[dict]]:
@@ -297,10 +462,13 @@ async def finalize(ctx, text: str) -> tuple[str, list[str], list[dict]]:
         last = m.end()
     out.append(text[last:])
     text = "".join(out)
+    text = check_latex(text)
     known = {a["id"] for a in ctx.artifacts}
     text = MARK.sub(lambda m: m.group(0) if m.group(1) in known else "", text)  # drop invented markers
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    if not buttons and text:
+    # Respect teach_level='none' on greetings/quick facts unless teacher_enabled or buttons already extracted
+    teach_level = getattr(ctx, "task_card", {}).get("teach_level", "auto")
+    if not buttons and text and teach_level != "none":
         defaults = DEFAULT_BUTTONS if ctx.req.teacher_enabled else ["Expand this answer", "Show an example"]
         buttons = [b for b in defaults if b != "Show a graph" or "chart" in ctx.req.tools][:3]
     ctx.emit("check", ok=True, note="Numbers, charts and pictures were checked." if ctx.artifacts else "Checked.")

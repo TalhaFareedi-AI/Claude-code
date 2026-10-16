@@ -21,7 +21,13 @@ class Skill:
 @lru_cache(maxsize=None)
 def all_skills() -> dict[str, Skill]:
     out: dict[str, Skill] = {}
-    for f in sorted(DIR.glob("*/SKILL.md")):
+    extra_dirs = ["d3-diagram-maker", "scientific-plotter", "docx-writer", "pptx-designer", "document-reviewer"]
+    files = {f.parent.name: f for f in DIR.glob("*/SKILL.md")}
+    for d in extra_dirs:
+        cand = DIR / d / "SKILL.md"
+        if cand.exists():
+            files[d] = cand
+    for _, f in sorted(files.items()):
         m = HEAD.match(f.read_text())
         if not m:
             continue
@@ -52,6 +58,11 @@ def match_keywords(text: str, enabled: list[str] | None = None) -> str | None:
         ("test-writer", r"\b(unit tests?|write tests?|test coverage|pytest|jest|regression test|edge cases? to test)\b"),
         ("sql-helper", r"\b(sql|query plan|select \*|inner join|left join|postgres|mysql|sqlite|index(es)? on|group by)\b"),
         ("api-designer", r"\b(api design|rest api|endpoints?|openapi|swagger|status code|payload shape|versioning)\b"),
+        ("d3-diagram-maker", r"\b(d3 diagram|interactive (architecture )?diagram|cnn diagram|transformer diagram|clickable diagram)\b"),
+        ("scientific-plotter", r"\b(waveform|sine wave|fft|frequency spectrum|signal spectrum|training curve|damped oscillat)\b"),
+        ("docx-writer", r"\b(word template|research paper docx|technical report docx|proposal docx)\b"),
+        ("pptx-designer", r"\b(pptx theme|slide master|academic theme|business theme)\b"),
+        ("document-reviewer", r"\b(audit document|review (this|the) (docx|pptx|pdf|deck|document)|check overflow)\b"),
         ("reviewer", r"\b(review (my|this|the)|code review|find (bugs|issues)|security hole|vulnerab|audit)\b"),
         ("prompt-smith", r"\b(prompt|system message|jailbreak|few.?shot)\b"),
         ("coder", r"\b(code|function|script|python|javascript|typescript|rust|java\b|refactor|regex|implement)\b"),
@@ -64,7 +75,7 @@ def match_keywords(text: str, enabled: list[str] | None = None) -> str | None:
         ("note-taker", r"\b(my notes|organi[sz]e (these|my) notes|clean up .{0,15}notes|meeting notes|transcript)\b"),
         ("writer", r"\b(write (an?|my|the) (essay|email|letter|report|post|article)|draft|cover letter|proofread|edit my)\b"),
         ("decision-helper", r"\b(which (one |option )?should i|compare .{0,30}(and|vs|versus)|better choice|pros and cons|worth it)\b"),
-        ("architect", r"\b(architect|system design|design (a|an|the) (system|app|service)|scale|microservice)\b"),
+        ("architect", r"\b(architect|system design|design (a|an|the) (system|app|service|cnn|transformer|mamba|pipeline)|scale|microservice)\b"),
         ("researcher", r"\b(research|sources?|latest|current|cite|evidence|papers? on|find out about)\b"),
         ("explainer", r"\b(explain|what (is|are|does)|how (does|do)|don'?t understand|eli5|teach me)\b"),
     ]

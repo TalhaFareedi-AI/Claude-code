@@ -1,7 +1,20 @@
 """Admin routes. Every route needs an admin login (role=admin) or the ADMIN_TOKEN header, and every change is
 written to the user's activity log with the admin as the actor, so nothing happens silently."""
 from fastapi import Body, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+import pydantic as _pyd
+_PYD_V1 = getattr(_pyd, "__version__", "2").startswith("1.")
+def Field(*args, **kw):
+    if _PYD_V1:
+        if "pattern" in kw:
+            kw["regex"] = kw.pop("pattern")
+        if "max_items" in kw:
+            kw.pop("max_length", None)
+    else:
+        if "max_items" in kw:
+            kw["max_length"] = kw.pop("max_items")
+    return _pyd.Field(*args, **kw)
+
 
 from . import activity, billing, memory, plans, wallet, workspace
 from .db import jdump, jload, now
@@ -33,7 +46,7 @@ class PlanBody(BaseModel):
     price_usd: float = Field(0, ge=0, le=100000)
     credits: int = Field(0, ge=0, le=100_000_000)
     period_days: int = Field(30, ge=1, le=3650)
-    benefits: list[str] = Field(default_factory=list, max_length=12)
+    benefits: list[str] = Field(default_factory=list, max_length=12, max_items=12)
     rules: dict = Field(default_factory=dict)
     active: bool = True
     sort: int = 0

@@ -416,7 +416,8 @@ def _merge(target: dict, update: dict) -> None:
 
 async def _sse_data(lines):
     pending = []
-    async for line in lines:
+    async for raw_line in lines:
+        line = raw_line.rstrip("\r\n")
         if not line:
             if pending:
                 yield "\n".join(pending)

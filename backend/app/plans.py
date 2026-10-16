@@ -26,16 +26,20 @@ SEED_EXTRA = {
 }
 SEED_PLANS = [
     ("free", "Free", "subscription", 0, 100, 30,
-     ["100 credits every month", "Fast, Normal and Think Again on Quick brains", "2 charts a day"]),
+     ["100 sign-up gift credits", "Fast, Normal and Think Again on Quick brains", "2 charts a day"]),
     ("student", "Student", "subscription", 8, 800, 30,
      ["800 credits every month", "All study modes on Quick and Smart brains", "Effort up to High", "Word and PPT files"]),
     ("pro", "Pro", "subscription", 20, 2000, 30,
      ["2,000 credits every month", "Every mode, including Overthink, Council and Think Team",
       "Genius brains and Max effort", "5 GB of file storage"]),
     ("school", "School", "subscription", 12, 1000, 30,
-     ["1,000 credits per student every month", "Private route on by default", "Teacher-controlled brains"]),
+     ["1,000 credits per student every month", "Private route (ZDR) on by default", "Teacher-controlled brains"]),
+    ("pack_starter", "Starter Pack (500)", "topup", 5, 500, 365, ["500 one-time credits ($0.01/credit)", "Valid for 12 months"]),
     ("pack_small", "Top-up 800", "topup", 10, 800, 365, ["800 extra credits", "Valid for 12 months"]),
+    ("pack_standard", "Standard Pack (1,000)", "topup", 10, 1000, 365, ["1,000 one-time credits", "Valid for 12 months"]),
+    ("pack_big", "Big Pack (2,100)", "topup", 20, 2100, 365, ["2,100 credits (5% bonus)", "Valid for 12 months"]),
     ("pack_large", "Top-up 2,500", "topup", 25, 2500, 365, ["2,500 extra credits", "Valid for 12 months"]),
+    ("pack_large_50", "Large Pack (5,500)", "topup", 50, 5500, 365, ["5,500 credits (10% bonus)", "Valid for 12 months"]),
 ]
 DEFAULT_RULES = PLAN_RULES["free"] | SEED_EXTRA["free"]
 RULE_KEYS = {"tiers", "max_rounds", "max_tries", "charts_per_day", "retention_days", "storage_mb", "mcp", "images",

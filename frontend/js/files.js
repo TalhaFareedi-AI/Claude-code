@@ -33,6 +33,7 @@ export class FilesPanel {
       h('div', { class: 'acts' },
         h('button', { type: 'button', class: 'btn small', text: 'Open', onclick: () => this.open(f) }),
         h('button', { type: 'button', class: 'btn small', text: 'Download', onclick: () => this.download(f) }),
+        ['docx', 'doc', 'md', 'txt'].includes(f.kind) ? h('button', { type: 'button', class: 'btn small', title: 'Export as PDF', text: 'PDF', onclick: () => this.exportPdf(f) }) : null,
         h('button', { type: 'button', class: 'btn small danger-ghost', title: 'Delete this file for good', 'aria-label': `Delete ${f.name}`, text: '🗑', onclick: () => this.remove(f) })))));
   }
 
@@ -61,6 +62,18 @@ export class FilesPanel {
       else this.preview.replaceChildren(h('p', { class: 'muted', text: p.note || 'No preview. Use Download.' }));
       this.preview.scrollIntoView({ block: 'nearest' });
     } catch (e) { if (seq === this.previewSeq) toast(e.message); }
+  }
+
+  async exportPdf(f) {
+    try {
+      const res = await api(`/api/files/${f.id}/pdf`, { method: 'POST' });
+      await this.refresh(this.convId);
+      if (res.url) {
+        const a = h('a', { href: res.url, download: res.file?.name || 'document.pdf' });
+        document.body.append(a); a.click(); a.remove();
+      }
+      toast('Exported PDF');
+    } catch (e) { toast(e.message); }
   }
 
   async download(f) {

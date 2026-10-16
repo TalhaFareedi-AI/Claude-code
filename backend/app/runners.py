@@ -6,13 +6,13 @@ A role is a slot for a brain. A mode is a list of roles, so one chain can use a 
 import asyncio
 import re
 
-from . import prompts, skills, workspace
+from . import prompts, recursive, skills, workspace
 from .config import settings
 from .db import jdump, jload, now
 from .harness import LimitReached, RunContext, RunResult, RunStopped, UserError, parse_json, tokens_of
 from .openrouter import OpenRouterError
-from .postprocess import NEXT, build_chart, new_artifact, svg_artifact
-from .tools import calc as calc_tool, diagram, docx_builder, pptx_builder
+from .postprocess import NEXT, build_chart, d3_spec_to_svg, new_artifact, svg_artifact, validate_d3_diagram
+from .tools import calc as calc_tool, diagram, docx_builder, pdf_builder, pptx_builder, science_plot
 from . import charts
 from . import team as teams
 
@@ -376,10 +376,12 @@ async def run_deep(ctx: RunContext) -> RunResult:
         skill = await pick_skill(ctx)
         if skill:
             ctx.emit("skill_used", name=skill.name)
+    learned_ev = recursive.apply_learned_lessons(ctx)
+    learned_rules = ("\n\nLearned harness lessons (from EXPERIENCE.md):\n- " + "\n- ".join(learned_ev["lessons"])) if learned_ev else ""
     if state is None:
         step(ctx, 0, "Planning")
         await teams.understand(ctx)
-        steps = await make_plan(ctx, skill.body if skill else "", max_steps)
+        steps = await make_plan(ctx, (skill.body if skill else "") + learned_rules, max_steps)
         state = {"steps": steps, "results": [], "skill": skill.name if skill else None,
                  "task_card": getattr(ctx, "task_card", {}), "failures": [], "replans": 0}
         step_done(ctx, 0)
@@ -396,7 +398,7 @@ async def run_deep(ctx: RunContext) -> RunResult:
     if (cfg["plan_mode"] == "ask" and not state.get("plan_approved")) or state.get("awaiting_plan_approval"):
         teams.approval(ctx, state)
         return RunResult("The plan is ready for review. Approve it or edit the steps to start work.", paused=True)
-    skill_text = ("\n\nRecipe to follow:\n" + skill.body) if skill else ""
+    skill_text = (("\n\nRecipe to follow:\n" + skill.body) if skill else "") + learned_rules
     try:
         await teams.prepare_team(ctx, state)
         teams.save_state(ctx, state)
@@ -426,6 +428,16 @@ async def run_deep(ctx: RunContext) -> RunResult:
                     break
                 if attempt < 2:
                     ctx.emit("notice", text=f"Fixing {s['title']}: {problem[:160]}")
+            # Optional Critic sub-agents on completed step (section 16, pages 73-75)
+            try:
+                critic_reports = await teams.run_critics(ctx, s, result, parent_model=worker, step_no=i + 1)
+                problems_found = [r for r in critic_reports if r.get("verdict") == "problem" and r.get("fix")]
+                if problems_found:
+                    state.setdefault("critic_notes", []).extend(problems_found)
+            except (RunStopped, LimitReached):
+                raise
+            except Exception:
+                pass
             state["results"].append(result)
             ctx.best = result
             step_done(ctx, i + 1, ok=ok, detail=result[:400])
@@ -514,6 +526,29 @@ async def run_deep(ctx: RunContext) -> RunResult:
             teams.notice(ctx, "The correction could not finish; keeping the completed answer and checker feedback.")
             break
         text = fixed.text or text
+
+    # Section 18 Recursive Harness Inner Loop (Propose, Probe, Compose) when self_improve='recursive'
+    if cfg.get("self_improve", {}).get("mode") == "recursive":
+        try:
+            imp = await recursive.run_inner_loop(ctx, text, state)
+            if imp and imp.get("after", {}).get("system_rule"):
+                h1_rule = imp["after"]["system_rule"]
+                final_res = await teams.agent_call(
+                    ctx, "finisher" if cfg["finisher"]["enabled"] else "builder", ans,
+                    msgs + [
+                        {"role": "assistant", "content": text[:6000]},
+                        {"role": "user", "content": f"Apply composed harness H1 improvement rule ({h1_rule}) and deliver the final polished answer."},
+                    ],
+                    max_tokens=mt(ctx, "answer"), effort="off",
+                    config=cfg["finisher"] if cfg["finisher"]["enabled"] else cfg["builder"],
+                )
+                if final_res.text.strip():
+                    text = final_res.text
+        except (RunStopped, LimitReached):
+            pass
+        except Exception:
+            pass
+
     workspace.write_todo(ctx.user["id"], ctx.task["id"], state["steps"], len(state["steps"]))
     state["completed"] = True
     teams.save_state(ctx, {**state, "results": [*state["results"], text]})
@@ -538,6 +573,10 @@ async def do_step(ctx: RunContext, worker: dict, s: dict, state: dict, skill_tex
         return await chart_step(ctx, worker, context)
     if kind == "diagram":
         return await diagram_step(ctx, worker, context)
+    if kind == "d3_diagram":
+        return await d3_step(ctx, worker, context)
+    if kind == "science_plot":
+        return await science_plot_step(ctx, worker, context)
     if kind == "research":
         notes = await teams.research(ctx, [s])
         return teams.context({"research": notes}) or "(no output: research is disabled)"
@@ -593,6 +632,37 @@ async def diagram_step(ctx: RunContext, worker: dict, context: str) -> str:
     ok = bool(marker.strip())
     ctx.emit("tool_result", tool="diagram", ok=ok, summary="Diagram ready" if ok else "Could not draw it", cost=ctx.meter.credits)
     return f"Diagram built {marker.strip()}" if ok else "(no diagram)"
+
+
+async def d3_step(ctx: RunContext, worker: dict, context: str) -> str:
+    ctx.emit("tool_start", tool="d3_diagram", title="Building interactive D3 architecture diagram")
+    raw = await teams.agent_json(ctx, "builder", worker, [
+        {"role": "system", "content": prompts.get("team_arch_spec")},
+        {"role": "user", "content": context}], max_tokens=1400, config=teams.effective_team(ctx)["builder"])
+    try:
+        spec = validate_d3_diagram(raw)
+    except Exception as e:
+        ctx.emit("tool_result", tool="d3_diagram", ok=False, summary=str(e)[:120], cost=ctx.meter.credits)
+        return "(no diagram: invalid D3 spec)"
+    art = new_artifact(ctx, "d3_diagram", spec)
+    ctx.emit("tool_result", tool="d3_diagram", ok=True, summary=spec["title"], cost=ctx.meter.credits)
+    return f"Interactive D3 diagram built: {spec['title']} (marker [[artifact:{art['id']}]])"
+
+
+async def science_plot_step(ctx: RunContext, worker: dict, context: str) -> str:
+    ctx.emit("tool_start", tool="science_plot", title="Computing scientific plot in sandbox")
+    raw = await teams.agent_json(ctx, "builder", worker, [
+        {"role": "system", "content": "Return a JSON object for science_plot: {\"kind\":\"waveform|spectrum|damped|gaussian|training|formula\",\"title\":\"...\",\"freq\":5,\"amp\":1,\"duration\":1}. JSON only."},
+        {"role": "user", "content": context}], max_tokens=600, config=teams.effective_team(ctx)["builder"])
+    try:
+        data = science_plot.compute_series(raw)
+        data["svg"] = science_plot.render_svg(data)
+    except Exception as e:
+        ctx.emit("tool_result", tool="science_plot", ok=False, summary=str(e)[:120], cost=ctx.meter.credits)
+        return "(no plot: scientific plot failed)"
+    art = new_artifact(ctx, "science_plot", data)
+    ctx.emit("tool_result", tool="science_plot", ok=True, summary=data["title"], cost=ctx.meter.credits)
+    return f"Scientific plot built: {data['title']} (marker [[artifact:{art['id']}]])"
 
 
 # ======================================================================= PPT and documents
@@ -802,15 +872,17 @@ def _preview(deck: dict, is_ppt: bool) -> list[dict]:
 
 
 async def edit_item(ctx: RunContext, worker: dict, deck: dict, idx: int, is_ppt: bool) -> RunResult:
-    items = deck["slides"] if is_ppt else deck["sections"]
+    items = deck.get("slides" if is_ppt else "sections") or []
     if not 0 <= idx < len(items):
-        raise UserError(f"There is no {'slide' if is_ppt else 'section'} {idx + 1}. It has {len(items)}.")
-    step(ctx, 1, f"Rewriting {'slide' if is_ppt else 'section'} {idx + 1}")
-    sysm = prompts.render("ppt_slide", i=idx + 1) if is_ppt else prompts.get("doc_section")
-    res = await ctx.json_call("worker", worker, [
-        {"role": "system", "content": sysm},
-        {"role": "user", "content": f"Current version:\n{jdump(items[idx])[:3000]}\n\nChange requested: {ctx.req.message[:500]}\n"
-                                    "Return the full updated item."}], max_tokens=1100)
-    items[idx] = pptx_builder.clamp_slide({**items[idx], **res}) if is_ppt else {**items[idx], **res}
+        raise UserError(f"There is no {'slide' if is_ppt else 'section'} {idx + 1} in that file.")
+    step(ctx, 1, f"Updating {'slide' if is_ppt else 'section'} {idx + 1}")
+    sys = prompts.render("ppt_slide", i=idx + 1) if is_ppt else prompts.get("doc_section")
+    old = jdump(items[idx])
+    new = await teams.agent_json(ctx, "builder", worker, [
+        {"role": "system", "content": sys},
+        {"role": "user", "content": f"Current part:\n{old}\n\nUser's change request: {ctx.req.message}"}],
+        max_tokens=1000, config=teams.effective_team(ctx)["builder"])
+    items[idx] = pptx_builder.clamp_slide(new) if is_ppt else new
     step_done(ctx, 1)
-    return await build_file(ctx, deck, is_ppt, deck["title"], version_note=" (new version)")
+    return await build_file(ctx, deck, is_ppt, deck.get("title", "Updated"),
+                            version_note=f" (new version: updated {'slide' if is_ppt else 'section'} {idx + 1})")

@@ -425,3 +425,23 @@ table.data-table { border-collapse: collapse; width: 100%; font-size: .9rem; }
 .image-art img { width: 100%; height: auto; display: block; background: var(--panel-2); min-height: 80px; }
 .img-foot { display: flex; align-items: center; gap: var(--s2); padding: 8px var(--s3); border-top: 1px solid var(--line); }
 .img-foot .muted { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Visual badges, D3 interactive architecture diagrams, KaTeX math, Critic sub-agents & Recursive Harness */
+.art-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.art-head h3 { margin: 0; }
+.visual-badge { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+.d3-stage { overflow-x: auto; padding: 8px 0; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); margin-bottom: 8px; }
+.d3-svg { display: block; width: 100%; height: auto; transition: transform 0.15s ease; }
+.d3-inspector { margin-top: 8px; padding: 10px 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); }
+.d3-card-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.d3-io-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; font-size: 13px; }
+.d3-io { padding: 6px 8px; border-radius: 6px; background: var(--panel); border: 1px solid var(--border); }
+.math-block { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; margin: 10px 0; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); font-family: 'Cambria Math', 'STIX Two Math', Georgia, serif; font-size: 1.08em; overflow-x: auto; }
+.math-inline { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: 5px; background: color-mix(in srgb, var(--accent) 9%, transparent); font-family: 'Cambria Math', 'STIX Two Math', Georgia, serif; }
+.math-copy { font-size: 10px; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); cursor: pointer; }
+.math-copy:hover { color: var(--fg); border-color: var(--accent); }
+.critic-card { border-left: 3px solid var(--accent); }
+.critic-card.verdict-problem { border-left-color: #d97706; }
+.verdict-chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.verdict-chip.problem { background: rgba(217, 119, 6, 0.16); color: #d97706; }
+.harness-diff { border-left: 3px solid var(--accent); padding-left: 8px; }

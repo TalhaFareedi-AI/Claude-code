@@ -15,15 +15,32 @@ from pathlib import Path
 from fastapi import Body, Cookie, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+import pydantic as _pyd
 
-from . import accounts, activity, billing, catalog, memory, modes as modes_mod, plans, skills, wallet, workspace
+_PYD_V1 = getattr(_pyd, "__version__", "2").startswith("1.")
+
+
+def Field(*args, **kw):
+    if _PYD_V1:
+        if "pattern" in kw:
+            kw["regex"] = kw.pop("pattern")
+        if "max_items" in kw:
+            kw.pop("max_length", None)
+    else:
+        if "max_items" in kw:
+            kw["max_length"] = kw.pop("max_items")
+    return _pyd.Field(*args, **kw)
+
+
+from . import accounts, activity, billing, catalog, memory, modes as modes_mod, plans, recursive, skills, team as team_mod, wallet, workspace
 from .config import ROOT, settings
 from .db import DB, jdump, jload, now
 from .harness import Harness, RunContext, RunRequest, UserError
 from .openrouter import OpenRouter, OpenRouterError
 from .plans import rules as plan_rules
 from .pricing import EFFORT_ORDER
+from .tools import pdf_builder
 
 FRONTEND = ROOT / "frontend"
 TOOLS = [
@@ -54,7 +71,7 @@ class ChatBody(BaseModel):
     length: str = Field("auto", pattern=r"^(auto|short|medium|long)$")
     image_model: str | None = Field(None, max_length=200)
     teacher_model: str | None = Field(None, max_length=200)
-    approved_plan: list[dict] | None = Field(None, max_length=12)
+    approved_plan: list[dict] | None = Field(None, max_length=12, max_items=12)
     effort: str = "auto"
     rounds: int | None = None
     tries: int | None = None
@@ -85,6 +102,7 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
     catalog.seed(db)
     modes_mod.seed(db)
     plans.bind(db, modes_mod.listing(db))
+    recursive.seed(db)
     if settings.admin_email and settings.admin_password:
         try:
             accounts.ensure_admin(db, settings.admin_email, settings.admin_password)
@@ -217,6 +235,10 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
             "image_model": user.get("image_model"),
             "skills": [{"name": s.name, "description": s.description} for s in skills.all_skills().values()],
             "roles": ROLE_LABELS,
+            "critic_roles": [{"id": k, "question": v} for k, v in team_mod.CRITIC_ROLES.items()],
+            "self_improve_modes": [{"id": "off", "label": "Off: plain harness"},
+                                   {"id": "learned", "label": "Learned: apply lesson library"},
+                                   {"id": "recursive", "label": "Recursive (Propose, Probe, Compose)"}],
             "dev_mode": settings.dev_mode,
             "unlock_all": settings.unlock_all,
             "has_key": bool(llm.api_key),
@@ -383,6 +405,27 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         own_file(user, fid)
         return {"url": f"/download?token={workspace.sign(fid, user['id'])}", "expires_in": settings.link_ttl_s}
 
+    @app.post("/api/files/{fid}/pdf")
+    def export_pdf(request: Request, fid: str):
+        """Export a workspace document (.docx or .md) to a downloadable PDF file (section 6, page 25)."""
+        user = who(request)
+        r = own_file(user, fid)
+        src = workspace.path_of(r)
+        out_path = src.with_suffix(".pdf")
+        if r["kind"] == "docx":
+            a = db.one("SELECT data FROM artifacts WHERE user_id=? AND task_id=? AND kind='doc_json' ORDER BY created_at DESC",
+                       (user["id"], r["task_id"]))
+            doc = jload(a["data"], {}) if a else {"title": Path(r["name"]).stem, "sections": [{"heading": "Document", "paragraphs": ["Exported from Word document."]}]}
+            pdf_builder.build_from_doc(doc, out_path)
+        elif r["kind"] in ("doc", "slides", "md", "txt"):
+            md_txt = src.read_text(errors="replace") if src.exists() else ""
+            pdf_builder.build_from_markdown(Path(r["name"]).stem.replace("-", " ").title(), md_txt, out_path)
+        else:
+            raise HTTPException(400, "Only documents and notes can be exported to PDF.")
+        workspace.check_storage(db, user["id"], user["plan"], out_path.stat().st_size)
+        rec = workspace.register(db, user["id"], r["task_id"], out_path, "pdf", user["plan"])
+        return {"file": rec, "url": f"/download?token={workspace.sign(rec['id'], user['id'])}"}
+
     @app.get("/download")
     def download(request: Request, token: str):
         user = who(request)
@@ -460,7 +503,7 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         workspace.delete_all(db, user["id"])
         return {"ok": True}
 
-    # ---- wallet and profile ----------------------------------------------------------------------------------------------------------
+    # ---- wallet, profile, and recursive harness (section 18) -------------------------------------------------------------
     @app.get("/api/wallet")
     def wallet_ep(request: Request):
         user = who(request)
@@ -473,6 +516,32 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
         user = who(request)
         return db.all("SELECT step_no,role,model,input_tokens,cached_tokens,output_tokens,reasoning_tokens,cost_usd,credits_charged,finish_reason,latency_ms "
                       "FROM usage_events WHERE user_id=? AND task_id=? ORDER BY step_no", (user["id"], task_id))
+
+    @app.get("/api/lessons")
+    def get_lessons(request: Request):
+        user = who(request)
+        recursive.seed(db)
+        rows = db.all("SELECT id,scope,topic,text,evidence,helped_count,hurt_count,review_status,created_at FROM lessons "
+                      "WHERE (scope='shared' AND review_status='approved') OR (scope='personal' AND user_id=?) ORDER BY id DESC LIMIT 50",
+                      (user["id"],))
+        return {"lessons": rows}
+
+    @app.get("/api/harness/improvements")
+    def get_improvements(request: Request):
+        user = who(request)
+        rows = db.all("SELECT * FROM improvement_records WHERE user_id=? ORDER BY created_at DESC LIMIT 30", (user["id"],))
+        for r in rows:
+            r["edits"] = jload(r["edits"], {})
+            r["evidence"] = jload(r["evidence"], {})
+        return {"records": rows}
+
+    @app.post("/api/harness/undo")
+    def undo_harness(request: Request, record_id: str = Body(..., embed=True)):
+        user = who(request)
+        try:
+            return recursive.undo_improvement(db, user["id"], record_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
 
     @app.get("/api/profile")
     def get_profile(request: Request):

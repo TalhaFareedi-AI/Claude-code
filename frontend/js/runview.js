@@ -3,7 +3,7 @@
 import { h, $ } from './dom.js';
 import { renderMarkdown } from './markdown.js';
 setMarkdownRenderer((t) => renderMarkdown(t));
-import { renderChart, renderQuiz, renderSvg, renderFlashcards, renderTable, renderDoc, renderImage, setMarkdownRenderer } from './charts.js';
+import { renderChart, renderQuiz, renderSvg, renderFlashcards, renderTable, renderDoc, renderImage, renderD3Diagram, renderSciencePlot, setMarkdownRenderer } from './charts.js';
 
 const TOOL_NAMES = { calculator: 'Calculator', chart: 'Chart maker', diagram: 'Diagram', ppt_builder: 'PowerPoint builder', doc_builder: 'Word builder', web_search: 'Web search' };
 
@@ -23,6 +23,8 @@ export class ArtifactStore {
       else if (a.kind === 'table') n = renderTable(a.data);
       else if (a.kind === 'doc' || a.kind === 'slides') n = renderDoc(a.data, a.kind);
       else if (a.kind === 'image') n = renderImage(a.data);
+      else if (a.kind === 'd3_diagram') n = renderD3Diagram(a.data);
+      else if (a.kind === 'science_plot') n = renderSciencePlot(a.data);
     } catch (e) { console.error('artifact failed', e); n = h('div', { class: 'notice', text: 'This picture could not be drawn.' }); }
     if (n) this.nodes.set(id, n);
     return n;
@@ -218,6 +220,33 @@ export class RunView {
     if (!card) return;
     card.querySelector('.agent-status').textContent = [ev.ok === false || ['failed', 'stopped', 'skipped'].includes(ev.status) ? (ev.status || 'Needs attention') : 'Finished', ev.ms != null ? `${(ev.ms / 1000).toFixed(1)} s` : '', ev.credits != null ? `${ev.credits} credits` : ''].filter(Boolean).join(' · ');
     if (ev.summary) card.append(h('details', { class: 'fold' }, h('summary', { text: 'Result' }), h('pre', { text: String(ev.summary).slice(0, 1500) })));
+  }
+  on_critic_report(ev) {
+    const verdict = ev.verdict || 'pass';
+    const card = h('div', { class: `card critic-card verdict-${verdict}` },
+      h('span', { class: `verdict-chip ${verdict}`, text: `${ev.role || 'critic'}: ${verdict}` }),
+      ' · ',
+      h('span', { class: 'what', text: ev.finding || 'Checked.' }),
+      ev.fix ? h('div', { class: 'muted tiny', text: `Suggested fix: ${ev.fix}` }) : null);
+    this.body.append(card);
+  }
+  on_harness_improved(ev) {
+    const fold = h('details', { class: 'fold harness-diff' },
+      h('summary', { text: `🔄 Self-improve (${ev.mode}): ${ev.base_harness || 'H0'} → ${ev.new_harness || 'H1'}` }),
+      ev.observation ? h('p', { class: 'small', text: ev.observation }) : null,
+      ev.lessons?.length ? h('ul', { class: 'small' }, ev.lessons.map((l) => h('li', { text: l }))) : null,
+      ev.after?.system_rule ? h('pre', { text: `Before: ${ev.before?.system_rule || 'H0'}\nAfter:  ${ev.after.system_rule}` }) : null);
+    if (ev.id && !this.replay) {
+      const undoBtn = h('button', { type: 'button', class: 'btn small', text: 'Undo harness edit', onclick: async () => {
+        try {
+          await fetch('/api/harness/undo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ record_id: ev.id }) });
+          undoBtn.textContent = 'Undone (reverted to H0)';
+          undoBtn.disabled = true;
+        } catch { /* ignore */ }
+      } });
+      fold.append(undoBtn);
+    }
+    this.body.append(fold);
   }
   on_settled(ev) { this.charged = ev.charged; }
   on_ask(ev) {
