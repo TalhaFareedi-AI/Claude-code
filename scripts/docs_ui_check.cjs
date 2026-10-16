@@ -82,13 +82,12 @@ const ok = []; const check = (n, v, x = '') => { ok.push(v); console.log(`${v ? 
   }
 
   // ---- 5. response length is a visible control that reaches the server ----------------
-  await openSettings('limits');
+  await openSettings('models');
   const seg = p.locator('[aria-label="Response length"] button');
   check('response length is a plain Auto / Short / Normal / Long switch', (await seg.count()) === 4
     && (await seg.first().getAttribute('aria-pressed')) === 'true');
   await seg.nth(3).click();
   check('picking Long marks it as chosen', (await seg.nth(3).getAttribute('aria-pressed')) === 'true');
-  check('the tab summary shows the choice', /long/i.test(await p.locator('#tab-limits-btn').innerText()));
   const sent = p.waitForRequest((r) => r.url().includes('/api/chat') && r.method() === 'POST');
   await closeSettings();
   await ask('explain photosynthesis');

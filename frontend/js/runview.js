@@ -338,8 +338,16 @@ export class RunView {
     if (this.taskId && !this.replay) this.body.append(h('button', { type: 'button', class: 'btn small', text: '🔍 Run details', onclick: () => this.onDetails(this.taskId) }));
     const keep = this.display.open === 'always';
     if (ev.status === 'done' && !this.sawError && !this.sawAsk && !keep) this.toggle(true);
-    this.title.textContent = `${this.title.textContent.split(' · ')[0]} · ${({ done: 'finished', stopped: 'stopped', paused: 'paused', error: 'failed', awaiting_confirm: 'waiting for your yes', awaiting_plan: 'waiting for plan approval', blocked: 'not started' })[ev.status] || ev.status}`;
-    this.setCost(ev.used, ev.max);
+    // Plan section 14: a finished run folds to one line, such as "8 steps, 41 credits".
+    const steps = Math.max(this.planTotal || 0, this.stepCount || 0);
+    const credits = `${ev.used} credit${ev.used === 1 ? '' : 's'}`;
+    if (ev.status === 'done' && !this.sawError && !this.sawAsk) {
+      this.title.textContent = steps ? `${steps} step${steps === 1 ? '' : 's'}, ${credits}` : `Done, ${credits}`;
+      this.cost.textContent = 'Show steps';
+    } else {
+      this.title.textContent = `${this.title.textContent.split(' · ')[0]} · ${({ done: 'finished', stopped: 'stopped', paused: 'paused', error: 'failed', awaiting_confirm: 'waiting for your yes', awaiting_plan: 'waiting for plan approval', blocked: 'not started' })[ev.status] || ev.status}`;
+      this.setCost(ev.used, ev.max);
+    }
     if (!this.replay) { if (this._raf) cancelAnimationFrame(this._raf); this.paint(true); }
   }
 }

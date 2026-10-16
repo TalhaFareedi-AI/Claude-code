@@ -106,6 +106,7 @@ MIGRATIONS = [
     ("conversations", "notes TEXT DEFAULT ''"),
     ("model_catalog", "image_out INTEGER DEFAULT 0"),
     ("users", "image_model TEXT"),
+    ("users", "ui_prefs TEXT"),
 ]
 
 # Full-text search keeps memory recall fast: past messages and saved memories are indexed as they are written.

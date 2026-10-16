@@ -5,7 +5,7 @@ import { renderSvg } from './charts.js';
 import { renderMarkdown } from './markdown.js';
 
 const ICON = { pptx: '📊', docx: '📝', svg: '🖼️', pdf: '📕', txt: '📄', doc: '📄', slides: '📊', md: '📄', png: '🖼️', jpg: '🖼️' };
-const size = (n) => (n > 1073741824 ? `${(n / 1073741824).toFixed(1)} GB` : n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n > 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
+export const size = (n) => (n > 1073741824 ? `${(n / 1073741824).toFixed(1)} GB` : n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n > 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
 
 export class FilesPanel {
   constructor() { this.list = $('#file-list'); this.empty = $('#files-empty'); this.preview = $('#preview'); this.count = $('#files-count'); this.refreshSeq = 0; this.previewSeq = 0; }
@@ -76,11 +76,28 @@ export class FilesPanel {
     } catch (e) { toast(e.message); }
   }
 
-  async download(f) {
-    try {
-      const { url } = await api(`/api/files/${f.id}/link`);
-      const a = h('a', { href: url, download: f.name });
-      document.body.append(a); a.click(); a.remove();
-    } catch (e) { toast(e.message); }
-  }
+  download(f) { return downloadFile(f); }
+}
+
+export async function downloadFile(f) {
+  try {
+    const { url } = await api(`/api/files/${f.id}/link`);
+    const a = h('a', { href: url, download: f.name });
+    document.body.append(a); a.click(); a.remove();
+  } catch (e) { toast(e.message); }
+}
+
+// Plan section 14: a file card has the type, name, size and version, with Open and Download.
+// Several files from one answer group into one "Files (3)" card.
+export function fileCards(list, { onOpen }) {
+  if (!list?.length) return null;
+  const row = (f) => h('div', { class: 'file-row' },
+    h('span', { class: `type-badge ${f.kind}`, 'aria-hidden': 'true', text: (f.kind || 'file').slice(0, 4).toUpperCase() }),
+    h('div', null, h('div', { class: 'name', text: f.name }), h('div', { class: 'meta', text: [f.kind?.toUpperCase(), f.size ? size(f.size) : null, f.version > 1 ? `version ${f.version}` : null].filter(Boolean).join(' · ') })),
+    h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn small', text: 'Open', 'aria-label': `Open ${f.name}`, onclick: () => onOpen(f) }),
+      h('button', { type: 'button', class: 'btn small', text: 'Download', 'aria-label': `Download ${f.name}`, onclick: () => downloadFile(f) })));
+  if (list.length === 1) return h('div', { class: 'files-card single' }, row(list[0]));
+  const card = h('details', { class: 'files-card', open: true }, h('summary', null, `📎 Files (${list.length})`, h('span', { class: 'muted', text: 'Open, or download each' })));
+  list.forEach((f) => card.append(row(f)));
+  return card;
 }

@@ -193,6 +193,8 @@ class FakeOpenRouter:
         if self.extra_blocks:
             text += '```flashcards\n{"title":"Deck","cards":[{"front":"Q1","back":"A1"},{"front":"Q2","back":"A2"},{"front":"Q3","back":"A3"}]}\n```\n\n'
             text += '```table\n{"title":"Compare","columns":[{"key":"n","label":"Name"},{"key":"v","label":"Value","type":"number"}],"rows":[{"n":"a","v":1},{"n":"b","v":2}]}\n```\n\n'
+        if "very long answer" in low:
+            text += "\n\n".join(f"Point {i}: plants turn light, water and air into sugar, and that sugar feeds every part of the plant." for i in range(1, 46)) + "\n\n"
         text += "Check question: where does a plant get its energy?\n\n[[next: Explain simpler | Quiz me | Show a graph]]"
         return text
 

@@ -33,7 +33,7 @@ def Field(*args, **kw):
     return _pyd.Field(*args, **kw)
 
 
-from . import accounts, activity, billing, catalog, memory, modes as modes_mod, plans, recursive, skills, team as team_mod, wallet, workspace
+from . import accounts, activity, billing, catalog, memory, modes as modes_mod, plans, recursive, skills, team as team_mod, uiprefs, wallet, workspace
 from .config import ROOT, settings
 from .db import DB, jdump, jload, now
 from .harness import Harness, RunContext, RunRequest, UserError
@@ -233,6 +233,9 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
             "image_models": [{"id": m["id"], "name": m["name"], "lab": m["lab"], "price_out": m["price_out"]}
                              for m in catalog.image_models(db)],
             "image_model": user.get("image_model"),
+            "ui_prefs": uiprefs.clean(jload(user.get("ui_prefs"), {})),
+            "ui_defaults": uiprefs.DEFAULTS,
+            "ui_choices": {**uiprefs.CHOICES, "chips": uiprefs.CHIPS, "side_items": uiprefs.SIDE_ITEMS, "accents": uiprefs.ACCENTS},
             "skills": [{"name": s.name, "description": s.description} for s in skills.all_skills().values()],
             "roles": ROLE_LABELS,
             "critic_roles": [{"id": k, "question": v} for k, v in team_mod.CRITIC_ROLES.items()],
@@ -576,7 +579,12 @@ def create_app(llm: OpenRouter | None = None, db: DB | None = None) -> FastAPI:
             if wanted and not any(m["id"] == wanted for m in catalog.image_models(db)):
                 raise HTTPException(400, "That model cannot generate images.")
             db.run("UPDATE users SET image_model=? WHERE id=?", (wanted, user["id"]))
-        return {"ok": True}
+        if "ui_prefs" in data:
+            raw = data["ui_prefs"]
+            if raw is not None and (not isinstance(raw, dict) or len(jdump(raw)) > 4000):
+                raise HTTPException(400, "Those display settings are not valid.")
+            db.run("UPDATE users SET ui_prefs=? WHERE id=?", (jdump(uiprefs.clean(raw)) if raw else None, user["id"]))
+        return {"ok": True, "ui_prefs": uiprefs.clean(raw) if "ui_prefs" in data and raw else {}}
 
     # ---- dev + admin ---------------------------------------------------------------------------------------------------------------------------
     def need_admin(request: Request) -> dict:

@@ -1,0 +1,105 @@
+/* The user's look and layout: extra themes, shape, motion, and the controls that change them.
+   Everything here reads variables that frontend/js/prefs.js sets, so a change shows at once. */
+
+/* ---------- themes (light and dark live in app.css) ---------- */
+:root[data-theme="sepia"] {
+  --bg: #f1e8d2; --panel: #fbf5e6; --panel-2: #eee3c8; --ink: #3a2e1d; --muted: #6b5e45; --line: #d9ccac;
+  --accent: #8a5a2b; --accent-ink: #ffffff; --accent-soft: #efdfbf; --warn: #8a5300; --warn-soft: #f6e4b8;
+  --bad: #a3261b; --bad-soft: #f6d9d2; --ok: #2f6b2f; --focus: #1a5fd0; --shadow: 0 6px 24px rgba(70, 50, 20, .14);
+  --c1: #8a5a2b; --c2: #2f6f6b; --c3: #5b6ee1; --c4: #b0872a; --c5: #8a4fb0; --c6: #3a8fb7; color-scheme: light;
+}
+:root[data-theme="midnight"] {
+  --bg: #000000; --panel: #0c0c0f; --panel-2: #15151a; --ink: #ededf0; --muted: #9b9ba6; --line: #26262d;
+  --accent: #6ec7b2; --accent-ink: #04140f; --accent-soft: #11261f; --warn: #f0b45a; --warn-soft: #2b2110;
+  --bad: #ff8a80; --bad-soft: #351816; --ok: #6fd39a; --focus: #8bb3ff; --shadow: 0 6px 24px rgba(0, 0, 0, .7);
+  --c1: #6ec7b2; --c2: #f08a52; --c3: #8c9bff; --c4: #e0b94f; --c5: #c08be0; --c6: #6cc2ea; color-scheme: dark;
+}
+:root[data-theme="contrast"] {
+  --bg: #ffffff; --panel: #ffffff; --panel-2: #eeeeee; --ink: #000000; --muted: #262626; --line: #000000;
+  --accent: #0b4fd1; --accent-ink: #ffffff; --accent-soft: #dce7ff; --warn: #5c3300; --warn-soft: #ffe9b8;
+  --bad: #8a0000; --bad-soft: #ffdcd8; --ok: #004d1f; --focus: #ff5b00; --shadow: none;
+  --c1: #0b4fd1; --c2: #b34700; --c3: #5a2bd1; --c4: #7a5c00; --c5: #8a1b8a; --c6: #00607a; color-scheme: light;
+}
+:root[data-theme="contrast"] .btn, :root[data-theme="contrast"] .chip, :root[data-theme="contrast"] .box,
+:root[data-theme="contrast"] .msg.assistant .answer, :root[data-theme="contrast"] .run { border-width: 2px; }
+
+/* ---------- shape ---------- */
+html[data-round="sharp"] { --r: 4px; --r-sm: 3px; --pill: 6px; }
+html[data-round="round"] { --r: 20px; --r-sm: 14px; --pill: 999px; }
+html[data-font="readable"] body { letter-spacing: .012em; word-spacing: .06em; line-height: 1.7; }
+html[data-font="mono"] .bubble, html[data-font="mono"] .answer { font-size: .94em; }
+
+/* ---------- motion: "reduced" keeps the progress bar and the spinner, drops the decoration ---------- */
+html[data-anim="reduced"] :is(.msg, .plan li, .card, .think, .callrow, .notice, .ask, .err, .round-chip, .run.working .dot,
+  .plan li.active .what, .plan li.done .tick, .plan li.fail .tick) { animation: none !important; }
+html[data-anim="reduced"] .plan li.active .what { color: var(--ink); -webkit-text-fill-color: currentColor; background: none; }
+html[data-anim="reduced"] .cursor::after { animation: none; }
+html[data-anim="reduced"] { scroll-behavior: auto; }
+
+/* ---------- small switches in the page ---------- */
+.no-estimate .estimate { visibility: hidden; }
+
+/* ---------- long answers fold ---------- */
+.answer.folded { max-height: var(--fold-h, 640px); overflow: hidden; position: relative;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 90px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 90px), transparent); }
+.fold-toggle { align-self: flex-start; }
+
+/* ---------- settings: basic first, advanced folded ---------- */
+.adv { border: 1px dashed var(--line); border-radius: var(--r); padding: 0; background: transparent; }
+.adv > summary { cursor: pointer; padding: var(--s3) var(--s4); font-weight: 600; font-size: .9rem; display: flex; align-items: center; gap: 8px; min-height: 44px; list-style: none; }
+.adv > summary::-webkit-details-marker { display: none; }
+.adv > summary::before { content: "▸"; color: var(--muted); transition: transform .15s; }
+.adv[open] > summary::before { transform: rotate(90deg); }
+.adv > summary .muted { font-weight: 400; margin-left: auto; font-size: .8125rem; }
+.adv-body { padding: 0 var(--s4) var(--s4); display: grid; gap: var(--s3); }
+.big-choice { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--s2); }
+.big-choice button { text-align: left; border: 1px solid var(--line); background: var(--panel); border-radius: var(--r-sm); padding: 10px 12px; display: grid; gap: 2px; min-height: 64px; }
+.big-choice button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.big-choice b { font-size: .95rem; } .big-choice span { font-size: .8125rem; color: var(--muted); }
+.pane-actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.range-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; }
+.range-row input[type=range] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); min-height: 32px; }
+.range-row b { font-variant-numeric: tabular-nums; }
+
+/* ---------- look and layout ---------- */
+.looks { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s2); }
+.look-card { border: 1px solid var(--line); background: var(--panel); border-radius: var(--r); padding: 10px 12px; text-align: left; display: grid; gap: 6px; }
+.look-card:hover { border-color: var(--accent); }
+.look-card b { font-size: .95rem; } .look-card span { font-size: .8125rem; color: var(--muted); }
+.look-card .mini { display: flex; gap: 4px; height: 16px; } .look-card .mini i { flex: 1; border-radius: 4px; border: 1px solid var(--line); }
+.theme-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: var(--s2); }
+.theme-opt { border: 2px solid var(--line); background: var(--panel); border-radius: var(--r); padding: 8px; display: grid; gap: 6px; text-align: center; font-size: .8125rem; }
+.theme-opt .sw { height: 38px; border-radius: 8px; display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; border: 1px solid var(--line); }
+.theme-opt[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); font-weight: 700; }
+.swatches { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.swatches input[type=color] { width: 40px; height: 40px; padding: 0; border: 2px solid var(--line); border-radius: 50%; background: none; cursor: pointer; }
+.chip-pick { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.chip-pick label { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: var(--pill, 999px); padding: 4px 12px; min-height: 38px; background: var(--panel); }
+.chip-pick input { accent-color: var(--accent); width: 18px; height: 18px; }
+.save-note { color: var(--muted); font-size: .8125rem; }
+
+/* ---------- file cards, grouped ---------- */
+.files-card { border: 1px solid var(--line); border-radius: var(--r); background: var(--panel); overflow: hidden; }
+.files-card > summary { cursor: pointer; padding: 10px var(--s3); font-weight: 600; display: flex; align-items: center; gap: 8px; list-style: none; min-height: 44px; }
+.files-card > summary::-webkit-details-marker { display: none; }
+.files-card > summary .muted { font-weight: 400; margin-left: auto; font-size: .8125rem; }
+.files-card .file-row { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 8px var(--s3); border-top: 1px solid var(--line); }
+.files-card .file-row .name { font-weight: 600; overflow-wrap: anywhere; } .files-card .file-row .meta { font-size: .75rem; color: var(--muted); }
+.type-badge { display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 8px; font-size: .6rem; font-weight: 800; letter-spacing: .03em; color: #fff; background: var(--muted); }
+.type-badge.pptx, .type-badge.slides { background: #c2501f; } .type-badge.docx, .type-badge.doc { background: #2f6fd1; } .type-badge.pdf { background: #b3261e; }
+.type-badge.png, .type-badge.jpg, .type-badge.svg { background: #7a55c9; } .type-badge.md, .type-badge.txt { background: #4b5a66; }
+
+@media (max-width: 800px) { .big-choice { grid-template-columns: 1fr 1fr; } }
+
+/* ---------- tidier groups inside the settings sheet ---------- */
+.settings-card .mode-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.settings-card .mode-opt { min-height: 56px; }
+.looks, .theme-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 800px) {
+  .settings-card .mode-list { grid-template-columns: 1fr; }
+  .looks, .theme-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* The user's accent beats the theme's own. The extra :root raises it above [data-theme] rules. */
+html:root[style*="--accent-user"] { --accent: var(--accent-user); --accent-ink: var(--accent-ink-user, #fff); --c1: var(--accent-user);
+  --accent-soft: color-mix(in srgb, var(--accent-user) 16%, var(--panel)); }

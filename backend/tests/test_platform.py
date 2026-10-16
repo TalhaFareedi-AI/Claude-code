@@ -673,3 +673,35 @@ async def test_images_stay_off_unless_the_tool_is_on(harness, db, fake):
     tid, events = await run(harness, "u_img3", message="draw me a leaf", mode="fast", tools=["chart"])
     assert not [e for e in events if e["type"] == "ask" and e["kind"] == "image_model"]
     assert not db.all("SELECT id FROM workspace_files WHERE user_id='u_img3'")
+
+
+# ---------------------------------------------------------------- the user's look and layout
+def test_only_known_display_choices_survive_cleaning():
+    from app import uiprefs
+    dirty = {"theme": "midnight", "accent": "#12AB9f", "size": 500, "font": "comic-sans", "width": "wide",
+             "anim": "reduced", "timing": "yes", "fold_long": False, "chips": ["mode", "bogus", "mode", "tools"],
+             "side_items": ["files", "<script>"], "evil": "x", "round": None}
+    out = uiprefs.clean(dirty)
+    assert out == {"theme": "midnight", "accent": "#12ab9f", "size": 140, "width": "wide", "anim": "reduced",
+                   "fold_long": False, "chips": ["mode", "tools"], "side_items": ["files"]}
+    assert uiprefs.clean("nope") == {} and uiprefs.clean({"accent": "red; background:url(x)"}) == {}
+    assert uiprefs.effective({})["theme"] == "auto" and uiprefs.effective({"size": 90})["size"] == 90
+
+
+def test_the_defaults_are_themselves_valid():
+    from app import uiprefs
+    assert uiprefs.clean(uiprefs.DEFAULTS) == uiprefs.DEFAULTS
+
+
+async def test_a_saved_look_comes_back_on_the_next_visit(api):
+    async with client(api) as c:
+        before = (await c.get("/api/bootstrap")).json()
+        assert before["ui_prefs"] == {} and before["ui_defaults"]["theme"] == "auto"
+        r = await c.put("/api/settings", json={"ui_prefs": {"theme": "dark", "size": 120, "chips": ["mode", "team", "tools", "effort"], "junk": 1}})
+        assert r.status_code == 200 and r.json()["ui_prefs"] == {"theme": "dark", "size": 120, "chips": ["mode", "team", "tools", "effort"]}
+        after = (await c.get("/api/bootstrap")).json()
+        assert after["ui_prefs"]["theme"] == "dark" and "junk" not in after["ui_prefs"]
+        assert (await c.put("/api/settings", json={"ui_prefs": {"x": "y" * 5000}})).status_code == 400
+        assert (await c.put("/api/settings", json={"ui_prefs": "dark"})).status_code == 400
+        await c.put("/api/settings", json={"ui_prefs": None})
+        assert (await c.get("/api/bootstrap")).json()["ui_prefs"] == {}

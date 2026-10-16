@@ -27,8 +27,8 @@ export function sanitizeTeam(team, boot) {
 export function buildTeamSettings(boot, S, { onChange, brainSelect }) {
   const store = safeStore(), profileKey = `sh.team.profiles.${boot.user.id}`;
   const profiles = store.get(profileKey, {});
-  const planning = h('div', { class: 'team-settings', id: 'tab-planning' }), research = h('div', { class: 'team-settings', id: 'tab-research' }), build = h('div', { class: 'team-settings', id: 'tab-build' });
-  const roots = [planning, research, build], inside = (el) => roots.some((r) => r.contains(el));
+  const basic = h('div', { class: 'team-settings', id: 'team-basic' }), advanced = h('div', { class: 'team-settings', id: 'team-advanced' });
+  const roots = [basic, advanced], inside = (el) => roots.some((r) => r.contains(el));
   const update = (mutate, repaint = false) => {
     S.team = clone(S.team || {}); mutate(S.team); onChange(); if (repaint) render();
   };
@@ -123,49 +123,40 @@ export function buildTeamSettings(boot, S, { onChange, brainSelect }) {
       S.team = { ...S.team, name }; profiles[name] = clone({ team: S.team, teacher_enabled: S.teacher_enabled, teacher_model: S.teacher_model });
       store.set(profileKey, profiles); onChange(); render();
     } });
-    planning.replaceChildren(
-      h('p', { class: 'tab-intro', text: 'For bigger tasks the team can write a plan first, so the answer is built step by step. Pick a ready-made team, then adjust.' }),
-      h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Ready-made team' }), presets,
+    const block = (title, ...kids) => h('div', { class: 'team-block' }, title ? h('b', { class: 'small', text: title }) : null, ...kids);
+    basic.replaceChildren(
+      block('Ready-made team', presets,
         h('p', { class: 'muted small', text: 'Fast skips planning. Balanced uses one planner for bigger tasks. Full team compares three plans and adds specialists.' })),
-      h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'How planning works' }), h('div', { class: 'team-grid' },
+      block('The three things most people change', h('div', { class: 'team-grid' },
         field('Plan mode', select('Plan mode', [['off', 'Off: just answer'], ['auto', 'Auto: plan bigger tasks'], ['ask', 'Ask me: I approve the plan']], team.plan_mode || preset.plan_mode, (v) => update((t) => { t.plan_mode = v; }))),
+        field('Web researchers (0 = none)', number('Number of researchers', rc, 0, 5, (v) => update((t) => { t.researchers = { ...researchers, ...t.researchers, count: v ?? 0, enabled: (v ?? 0) > 0 }; }, true))),
+        field('Critical thinking', select('Critical thinking', [['off', 'Off'], ['auto', 'Auto: math, facts and code'], ['always', 'Always: all 5 critics']], team.critics?.mode || 'off', (v) => update((t) => { t.critics = { ...(t.critics || {}), mode: v }; }))))));
+    advanced.replaceChildren(
+      block('Planning', h('div', { class: 'team-grid' },
         field('Planning depth', select('Planning depth', [['light', 'Light: one plan'], ['normal', 'Normal: revise if it fails'], ['deep', 'Deep: review every step']], team.plan_depth || preset.plan_depth, (v) => update((t) => { t.plan_depth = v; }))),
         field('Planners (more = more ideas)', number('Number of planners', pc, 0, 3, (v) => update((t) => { t.planners = { ...planners, ...t.planners, count: v ?? 0, enabled: (v ?? 0) > 0 }; }, true))))),
-      h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Specialists (optional)' }),
-        h('div', { class: 'team-architects' }, ...[['ui', 'UI designer'], ['data', 'Data expert'], ['document', 'Slides and documents'], ['code', 'Code expert']].map(([id, label]) => toggle(label.replace(' expert', '').replace(' designer', '').replace('Slides and documents', 'Slides / document') + ' architect', architects.includes(id), (enabled) => update((t) => { t.architects = enabled ? [...new Set([...architects, id])] : architects.filter((a) => a !== id); }, true))))),
-      h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Who does each planning job (brain, effort, limits)' }), h('div', { class: 'team-roles' },
+      block('Specialists (optional)',
+        h('div', { class: 'team-architects' }, ...[['ui', 'UI designer'], ['data', 'Data expert'], ['document', 'Slides and documents'], ['code', 'Code expert']].map(([id, label]) => toggle(label.replace(' expert', '').replace(' designer', '').replace('Slides and documents', 'Slides / document') + ' architect', architects.includes(id), (enabled) => update((t) => { t.architects = enabled ? [...new Set([...architects, id])] : architects.filter((a) => a !== id); }, true)))),
+        field('Architecture agent (draws an interactive diagram)', select('Architecture agent', [['off', 'Off'], ['auto', 'Auto: when a design is requested'], ['on', 'Always draw a diagram']], team.architecture_agent || 'off', (v) => update((t) => { t.architecture_agent = v; })))),
+      block('Who does each planning job (model, effort, limits)', h('div', { class: 'team-roles' },
         roleCard('understand', 'Understand and enhance', team.understand),
         roleCard('enhancer', 'Prompt enhancer', team.enhancer),
         ...(pc ? [roleCard('planners', 'Planner', planners, { multiple: true, count: pc })] : []),
         ...(pc > 1 ? [roleCard('plan_judge', 'Plan judge', team.plan_judge)] : []),
         ...architects.map((id) => roleCard(id, `${id === 'document' ? 'Document' : id[0].toUpperCase() + id.slice(1)} architect`, team.architect_settings?.[id], { architect: true })))),
-      h('div', { class: 'team-block team-profiles' }, h('b', { class: 'small', text: 'Save this team for later' }), profileSelect,
-        h('div', { class: 'team-profile-save' }, profileName, save), h('p', { class: 'muted tiny', text: 'Saved in this browser. Your team and teacher choices are remembered separately for each chat.' })));
-    research.replaceChildren(
-      h('p', { class: 'tab-intro', text: 'Researchers search the web at the same time and bring back sources, so the answer can use fresh facts and links.' }),
-      h('div', { class: 'team-block' }, h('div', { class: 'team-grid' },
-        field('Researchers (0 = no web research)', number('Number of researchers', rc, 0, 5, (v) => update((t) => { t.researchers = { ...researchers, ...t.researchers, count: v ?? 0, enabled: (v ?? 0) > 0 }; }, true))),
+      block('Research', h('div', { class: 'team-grid' },
         field('Search engine', select('Research engine', [['auto', 'Auto'], ['exa', 'Exa'], ['parallel', 'Parallel'], ['perplexity', 'Perplexity']], researchers.engine || 'auto', (v) => update((t) => { t.researchers = { ...researchers, ...t.researchers, engine: v }; }))),
-        field('Searches per researcher', number('Searches per researcher', researchers.max_searches_each ?? 2, 1, 10, (v) => update((t) => { t.researchers = { ...researchers, ...t.researchers, max_searches_each: v ?? 2 }; }))))),
-      rc ? h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Who researches (brain, effort, limits)' }), h('div', { class: 'team-roles' }, roleCard('researchers', 'Researcher', researchers, { multiple: true, count: rc })))
-        : h('p', { class: 'muted small', text: 'Research is off. Set the number of researchers above 0 to turn it on.' }));
-    build.replaceChildren(
-      h('p', { class: 'tab-intro', text: 'After planning and research, a builder writes the work, a checker reviews it, and a finisher polishes it.' }),
-      h('div', { class: 'team-block' }, h('div', { class: 'team-grid' },
-        field('Most credits the whole team may use', number('Team credit cap', team.max_credits, 1, 2000, (v) => update((t) => { t.max_credits = v; }))))),
-      h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Builder, checker and finisher' }), h('div', { class: 'team-roles' },
-        roleCard('builder', 'Builder', team.builder), roleCard('checker', 'Checker', team.checker), roleCard('finisher', 'Finisher', team.finisher))),
-      h('div', { class: 'team-block' }, h('b', { class: 'small', text: 'Critical thinking sub-agents & Recursive self-improve' }), h('div', { class: 'team-grid' },
-        field('Critical thinking (5 sub-agents)', select('Critical thinking', [['off', 'Off'], ['auto', 'Auto: math, facts & code'], ['always', 'Always: all 5 critics']], team.critics?.mode || 'off', (v) => update((t) => { t.critics = { ...(t.critics || {}), mode: v }; }))),
-        field('Self-improve (Section 18 Harness²)', select('Self-improve', [['off', 'Off: plain harness'], ['learned', 'Learned: apply EXPERIENCE.md'], ['recursive', 'Recursive: Propose, Probe, Compose']], team.self_improve?.mode || 'off', (v) => update((t) => { t.self_improve = { ...(t.self_improve || { k: 1 }), mode: v }; }))),
-        field('Architecture agent (D3 diagram)', select('Architecture agent', [['off', 'Off'], ['auto', 'Auto: when design requested'], ['on', 'Always draw D3 diagram']], team.architecture_agent || 'off', (v) => update((t) => { t.architecture_agent = v; }))))),
-      h('div', { class: 'team-block team-teacher' }, h('b', { class: 'small', text: 'Teaching mode' }),
-        h('p', { class: 'muted small', text: 'Off (default): you get a direct answer at your own level, with no lesson, analogy or check question. On: the answer is explained like a tutor would, for a beginner.' }),
-        toggle('Explain answers like a tutor (treat me as a learner)', S.teacher_enabled === true, (enabled) => { S.teacher_enabled = enabled; onChange(); render(); }),
-        S.teacher_enabled === true ? field('Teacher model (optional: a separate explaining pass)', brainSelect(boot, S.teacher_model, (model) => { S.teacher_model = model || null; onChange(); }, { label: 'Teacher model' })) : null,
-        S.teacher_enabled === true ? h('p', { class: 'muted tiny', text: 'Leave the model on Auto to apply the teaching style inside the same answer. Choosing a model adds a separate explanation pass, which costs extra and shows in the estimate.' }) : null));
+        field('Searches per researcher', number('Searches per researcher', researchers.max_searches_each ?? 2, 1, 10, (v) => update((t) => { t.researchers = { ...researchers, ...t.researchers, max_searches_each: v ?? 2 }; })))),
+        rc ? h('div', { class: 'team-roles' }, roleCard('researchers', 'Researcher', researchers, { multiple: true, count: rc })) : h('p', { class: 'muted small', text: 'Research is off. Set the number of web researchers to 1 or more in the basics to turn it on.' })),
+      block('Build and check', h('div', { class: 'team-grid' },
+        field('Most credits the whole team may use', number('Team credit cap', team.max_credits, 1, 2000, (v) => update((t) => { t.max_credits = v; })))),
+        h('div', { class: 'team-roles' }, roleCard('builder', 'Builder', team.builder), roleCard('checker', 'Checker', team.checker), roleCard('finisher', 'Finisher', team.finisher))),
+      block('Self-improve', field('Learn from past tasks', select('Self-improve', [['off', 'Off: plain harness'], ['learned', 'Learned: apply the lesson library'], ['recursive', 'Recursive: propose, probe, compose']], team.self_improve?.mode || 'off', (v) => update((t) => { t.self_improve = { ...(t.self_improve || { k: 1 }), mode: v }; }))),
+        h('p', { class: 'muted tiny', text: 'Recursive runs the task several times, so the estimate shows first and it is only worth it for big jobs.' })),
+      block('Save this team for later', profileSelect,
+        h('div', { class: 'team-profile-save' }, profileName, save), h('p', { class: 'muted tiny', text: 'Saved in this browser. Your team choices are remembered separately for each chat.' })));
     for (const r of roots) for (const summary of r.querySelectorAll('details > summary')) if (expanded.has(summary.textContent)) summary.parentElement.open = true;
     if (focused) roots.flatMap((r) => [...r.querySelectorAll('[aria-label]')]).find((el) => el.getAttribute('aria-label') === focused)?.focus();
   }
-  render(); return { planning, research, build };
+  render(); return { basic, advanced };
 }

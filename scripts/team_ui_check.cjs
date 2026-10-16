@@ -13,13 +13,19 @@ const check = (name, ok) => { assert.ok(ok, name); results.push(name); console.l
     const page = await context.newPage(), errors = [], requests = [];
     page.on('pageerror', (e) => errors.push(e.message));
     page.on('request', (r) => { if (r.url().endsWith('/api/chat') && r.method() === 'POST') requests.push(r.postDataJSON()); });
+    // Advanced controls live in a fold; teaching is the "Answer style" choice in Models.
+    const advOpen = async (pg) => { const d = pg.locator('.tab-pane details.adv > summary:has-text("Advanced")'); if (!(await d.evaluate((el) => el.parentElement.open))) await d.click(); };
+    const tab = (pg, t) => pg.click(`#tab-${t}-btn`);
+    const teach = async (pg, on) => { await tab(pg, 'models'); await pg.locator(`[aria-label="Answer style"] button:has-text("${on ? 'Teach me' : 'Direct'}")`).click(); };
+    const teaching = async (pg) => { await tab(pg, 'models'); return (await pg.locator('[aria-label="Answer style"] button:has-text("Teach me")').getAttribute('aria-pressed')) === 'true'; };
     await page.goto(BASE); await page.waitForSelector('.welcome');
     await page.selectOption('#dev-plan', 'pro'); await page.waitForFunction(() => document.querySelector('#plan-badge').textContent === 'pro');
     await page.click('.chip:has-text("Team:")');
     await page.locator('[aria-label="Team preset"] button:has-text("Full team")').click();
+    await advOpen(page);
     const planners3 = await page.getByLabel('Number of planners', { exact: true }).inputValue();
     const architects4 = await page.locator('.team-architects input:checked').count(), depth = await page.getByLabel('Planning depth', { exact: true }).inputValue();
-    await page.click('#tab-research-btn'); const researchers3 = await page.getByLabel('Number of researchers', { exact: true }).inputValue(); await page.click('#tab-planning-btn');
+    const researchers3 = await page.getByLabel('Number of researchers', { exact: true }).inputValue();
     check('Full team selects three planners, three researchers and four architects', planners3 === '3' && researchers3 === '3' && architects4 === 4 && depth === 'deep');
     await page.locator('.team-agent summary').filter({ hasText: /^Planner$/ }).click();
     const planner3 = page.getByLabel('Planner 3 model', { exact: true });
@@ -29,13 +35,12 @@ const check = (name, ok) => { assert.ok(ok, name); results.push(name); console.l
     await page.locator('.team-instance summary').filter({ hasText: 'Planner 3 limits' }).click();
     await page.getByLabel('Planner 3 effort', { exact: true }).selectOption('high');
     await page.getByLabel('Planner 3 credit cap', { exact: true }).fill('8'); await page.getByLabel('Planner 3 credit cap', { exact: true }).blur();
-    await page.click('#tab-research-btn');
     await page.locator('.team-agent summary').filter({ hasText: /^Researcher$/ }).click();
     await page.locator('.team-instance summary').filter({ hasText: 'Researcher 3 limits' }).click();
     await page.getByLabel('Researcher 3 search engine', { exact: true }).selectOption('exa');
     await page.getByLabel('Researcher 3 search limit', { exact: true }).fill('3'); await page.getByLabel('Researcher 3 search limit', { exact: true }).blur();
-    await page.click('#tab-build-btn'); await page.getByLabel('Explain answers like a tutor (treat me as a learner)', { exact: true }).check();   // teaching is opt-in
-    await page.click('#tab-planning-btn'); await page.getByLabel('Team profile name', { exact: true }).fill('Research profile');
+    await teach(page, true);   // teaching is opt-in
+    await tab(page, 'team'); await page.getByLabel('Team profile name', { exact: true }).fill('Research profile');
     await page.getByRole('button', { name: 'Save profile', exact: true }).click();
     check('Named profiles preserve positional model choices and teacher preference', await page.evaluate(() => {
       const settings = JSON.parse(localStorage.getItem('sh.settings'));
@@ -43,14 +48,14 @@ const check = (name, ok) => { assert.ok(ok, name); results.push(name); console.l
     }));
     await page.locator('[aria-label="Team preset"] button:has-text("Fast")').click();
     await page.getByLabel('Saved team profile', { exact: true }).selectOption('Research profile');
-    const reloaded3 = await page.getByLabel('Number of planners', { exact: true }).inputValue(); await page.click('#tab-build-btn');
-    check('Loading a profile restores all its controls', reloaded3 === '3' && await page.getByLabel('Explain answers like a tutor (treat me as a learner)', { exact: true }).isChecked());
-    await page.click('#tab-planning-btn');
+    const reloaded3 = await page.getByLabel('Number of planners', { exact: true }).inputValue();
+    check('Loading a profile restores all its controls', reloaded3 === '3' && await teaching(page));
+    await tab(page, 'team');
     await page.locator('[aria-label="Team preset"] button:has-text("Balanced")').click();
     await page.getByLabel('Number of planners', { exact: true }).fill('2'); await page.getByLabel('Number of planners', { exact: true }).blur();
     await page.getByLabel('Plan mode', { exact: true }).selectOption('ask');
-    await page.click('#tab-research-btn'); await page.getByLabel('Number of researchers', { exact: true }).fill('0'); await page.getByLabel('Number of researchers', { exact: true }).blur();
-    await page.click('#tab-build-btn'); await page.getByLabel('Team credit cap', { exact: true }).fill('80'); await page.getByLabel('Team credit cap', { exact: true }).blur();
+    await page.getByLabel('Number of researchers', { exact: true }).fill('0'); await page.getByLabel('Number of researchers', { exact: true }).blur();
+    await page.getByLabel('Team credit cap', { exact: true }).fill('80'); await page.getByLabel('Team credit cap', { exact: true }).blur();
     await page.click('#settings-close');
     await page.fill('#composer-text', 'Give a detailed compound interest explanation, calculate it and draw a chart.'); await page.click('#send-btn');
     const approve = page.getByRole('button', { name: 'Approve plan and continue', exact: true });
@@ -74,11 +79,11 @@ const check = (name, ok) => { assert.ok(ok, name); results.push(name); console.l
     check('Approval resumes the original task with edited goals and a new request identity', approval?.continue_task === originalTask && approval.approved_plan[0].goal.startsWith('Calculate compound') && approval.confirm && approval.request_id !== requests[0].request_id && approval.teacher_enabled === true && approval.max_credits > 0);
     const chatA = await page.evaluate(() => JSON.parse(localStorage.getItem('sh.conv')));
     await page.reload(); await page.waitForSelector('.answer'); await page.click('.chip:has-text("Team:")');
-    const mode_ = await page.getByLabel('Plan mode', { exact: true }).inputValue(); await page.click('#tab-build-btn');
-    check('Conversation reload restores team and optional teacher settings', mode_ === 'ask' && await page.getByLabel('Explain answers like a tutor (treat me as a learner)', { exact: true }).isChecked());
+    const mode_ = await page.getByLabel('Plan mode', { exact: true }).inputValue();
+    check('Conversation reload restores team and optional teacher settings', mode_ === 'ask' && await teaching(page));
     await page.click('#settings-close'); await page.click('#new-chat'); await page.click('.chip:has-text("Team:")');
     await page.locator('[aria-label="Team preset"] button:has-text("Fast")').click();
-    await page.click('#tab-build-btn'); await page.getByLabel('Explain answers like a tutor (treat me as a learner)', { exact: true }).uncheck();   // this chat wants direct answers
+    await teach(page, false);   // this chat wants direct answers
     await page.click('#settings-close');
     let truncated = false;
     await page.route('**/api/chat', async (route) => {
@@ -115,8 +120,8 @@ const check = (name, ok) => { assert.ok(ok, name); results.push(name); console.l
     // Restore the first chat's saved choices, independent from the current team's profile.
     await page.evaluate((id) => { localStorage.setItem('sh.conv', JSON.stringify(id)); }, chatA);
     await page.reload(); await page.waitForSelector('.answer'); await page.click('.chip:has-text("Team:")');
-    const mode2_ = await page.getByLabel('Plan mode', { exact: true }).inputValue(); await page.click('#tab-build-btn');
-    check('Each chat keeps its own team selection', mode2_ === 'ask' && await page.getByLabel('Explain answers like a tutor (treat me as a learner)', { exact: true }).isChecked());
+    const mode2_ = await page.getByLabel('Plan mode', { exact: true }).inputValue();
+    check('Each chat keeps its own team selection', mode2_ === 'ask' && await teaching(page));
     await page.click('#settings-close');
     const mobile = await browser.newContext({ viewport: { width: 390, height: 780 }, isMobile: true, hasTouch: true });
     const phone = await mobile.newPage(); phone.on('pageerror', (e) => errors.push(e.message));

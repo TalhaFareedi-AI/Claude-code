@@ -3,7 +3,7 @@
 #   bash scripts/ui_all.sh [suite ...]        (default: all five)
 set -u
 cd "$(dirname "$0")/.."
-SUITES=${*:-"ui_check platform_ui_check team_ui_check layout_ui_check docs_ui_check"}
+SUITES=${*:-"ui_check platform_ui_check team_ui_check layout_ui_check docs_ui_check look_ui_check"}
 PORT=${PORT:-8765}
 SHOTS=${SHOTS:-/tmp/claude-0/shots}
 mkdir -p "$SHOTS"

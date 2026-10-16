@@ -2,15 +2,18 @@ import { $, $$, h, toast, safeStore, timeAgo } from './dom.js';
 import { api, streamChat, uploadFile, ApiError } from './api.js';
 import { renderMarkdown } from './markdown.js';
 import { ArtifactStore, RunView, messageFooter, nextButtons } from './runview.js';
-import { FilesPanel } from './files.js';
+import { FilesPanel, fileCards } from './files.js';
 import { setupAccount } from './account.js';
 import { setupLayout } from './layout.js';
-import { DEFAULTS, DISPLAY_DEFAULTS, ACCENTS, buildSettings, currentMode, modeName, modelLabel } from './settings.js';
+import { DEFAULTS, buildSettings, currentMode, modeName } from './settings.js';
+import { createPrefs, CHIP_LABELS } from './prefs.js';
+import { foldLong, refoldAll } from './fold.js';
 import { sanitizeTeam, teamName } from './team.js';
 
 const store = safeStore();
 const S = { ...JSON.parse(JSON.stringify(DEFAULTS)), ...store.get('sh.settings', {}) }; // choices for the next message
-const display = { ...DISPLAY_DEFAULTS, ...store.get('sh.display', {}) };
+const prefs = createPrefs({ api });
+const display = prefs.display;   // the small live view the run card reads
 const app = {
   boot: null, convId: null, running: false, controller: null, taskId: null, lastPayload: null, artifacts: new ArtifactStore(),
   stick: true, uploads: [], est: null, estSeq: 0, lastAssistantId: null,
@@ -29,7 +32,8 @@ const STARTERS = [
 // ------------------------------------------------------------------ boot
 let account, layout;
 async function init() {
-  applyTheme(store.get('sh.theme', null)); applyDisplay();
+  prefs.paintNow();
+  prefs.onChange(() => { paintChips(); refoldAll(thread, prefs.get().fold_long); });
   try {
     app.boot = await api('/api/bootstrap');
   } catch (e) {
@@ -37,6 +41,7 @@ async function init() {
   }
   const b = app.boot;
   document.title = b.app; $('#brand-name').textContent = b.app;
+  prefs.adopt(b.ui_prefs);
   sanitizeSettings();
   account = setupAccount({ app, dialog, hide: hideSheet, refreshWallet });
   paintWallet(b.wallet); paintPlan(); paintAccount();
@@ -64,7 +69,7 @@ function sanitizeSettings() {
   for (const [k, v] of Object.entries(S.brains)) if ([].concat(v).some((x) => x && !ids.has(x))) delete S.brains[k];
   S.tools = S.tools.filter((t) => b.tools.some((x) => x.id === t));
   S.team = sanitizeTeam(S.team, b);
-  S.teacher_enabled = S.teacher_enabled !== false;
+  S.teacher_enabled = S.teacher_enabled === true;
   if (S.teacher_model && !ids.has(S.teacher_model)) S.teacher_model = null;
 }
 
@@ -139,7 +144,7 @@ async function openConversation(id) {
   for (const m of c.messages) thread.append(renderHistory(m, m === lastAssistant));
   app.lastAssistantId = lastAssistant?.id ?? null;
   if (!c.messages.length) showWelcome();
-  files.refresh(id); refreshChats(); scrollDown(true);
+  files.refresh(id); refreshChats(); refoldAll(thread, prefs.get().fold_long); scrollDown(true);
 }
 
 function renderHistory(m, isLast) {
@@ -161,7 +166,7 @@ function renderHistory(m, isLast) {
   }
   msg.append(h('div', { class: 'answer' }, renderMarkdown(m.content, (id) => app.artifacts.node(id))));
   for (const n of m.notices || []) msg.append(h('div', { class: 'notice', text: n }));
-  if (m.files.length) msg.append(h('div', { class: 'btn-row' }, m.files.map((f) => h('span', { class: 'file-chip' }, '📄 ', f.name, h('button', { type: 'button', class: 'btn small', text: 'Open', onclick: () => { openFilesPanel(); files.open(f); } })))));
+  if (m.files.length) msg.append(fileCards(m.files, { onOpen: (f) => { openFilesPanel(); files.open(f); } }));
   msg.append(messageFooter({ msg: { id: m.id, rating: m.rating, credits: m.credits }, onRate: rate }));
   if (isLast && m.buttons.length) msg.append(nextButtons(m.buttons, (l) => nextStep(l, m.id)));
   return msg;
@@ -246,8 +251,9 @@ async function send(opts = {}) {
 function finishMessage(run, msgEl) {
   if (run.answerEl) {
     if (run.notices?.length) run.notices.forEach((n) => msgEl.append(h('div', { class: 'notice', text: n })));
-    if (run.files.length) msgEl.append(h('div', { class: 'btn-row' }, run.files.map((f) => h('span', { class: 'file-chip' }, '📄 ', f.name, h('button', { type: 'button', class: 'btn small', text: 'Open', onclick: () => { openFilesPanel(); files.open(f); } })))));
+    if (run.files.length) msgEl.append(fileCards(run.files, { onOpen: (f) => { openFilesPanel(); files.open(f); } }));
     msgEl.append(messageFooter({ msg: { id: run.messageId, credits: run.credits ?? run.used }, onRate: rate }));
+    requestAnimationFrame(() => foldLong(run.answerEl, prefs.get().fold_long));
     if (run.buttons.length && run.status !== 'error') msgEl.append(nextButtons(run.buttons, (l) => nextStep(l, run.messageId)));
     if (run.messageId) app.lastAssistantId = run.messageId;
   }
@@ -338,16 +344,22 @@ function scrollDown(force) {
 
 // ------------------------------------------------------------------ composer: chips, estimate, attachments
 function paintChips() {
-  const b = app.boot, m = currentMode(b, S);
-  const chip = (label, value, focus, cls = '') => h('button', { type: 'button', class: `chip ${cls}`, onclick: () => openSettings(focus) }, `${label}: `, h('b', { text: value }));
-  const brain = Object.keys(S.brains).length ? 'Custom' : 'Auto';
-  $('#chips').replaceChildren(
-    chip('Mode', modeName(b, S), 'mode'),
-    chip('Brains', brain, 'brains', 'hide-m'),
-    chip('Team', teamName(S.team), 'team'),
-    chip('Effort', b.efforts.find((e) => e.id === S.effort)?.label || 'Auto', 'effort', 'hide-m'),
-    chip('Tools', String(S.tools.length), 'tools', 'hide-m'),
-    h('button', { type: 'button', class: 'chip', onclick: () => openSettings('mode'), 'aria-label': 'All settings', text: '⚙ Settings' }));
+  const b = app.boot;
+  if (!b) return;
+  const value = {
+    mode: () => modeName(b, S),
+    team: () => teamName(S.team),
+    tools: () => String(S.tools.length),
+    brains: () => (Object.keys(S.brains).length || S.custom_models ? 'Custom' : 'Default'),
+    effort: () => b.efforts.find((e) => e.id === S.effort)?.label || 'Auto',
+    length: () => ({ auto: 'Auto', short: 'Short', medium: 'Normal', long: 'Long' }[S.length || 'auto']),
+  };
+  const focus = { mode: 'mode', team: 'team', tools: 'tools', brains: 'brains', effort: 'effort', length: 'length' };
+  const chip = (id) => h('button', { type: 'button', class: `chip${['mode', 'team', 'tools'].includes(id) ? '' : ' hide-m'}`, onclick: () => openSettings(focus[id]) }, `${CHIP_LABELS[id]}: `, h('b', { text: value[id]() }));
+  const wanted = Object.keys(CHIP_LABELS).filter((id) => prefs.get().chips.includes(id));
+  $('#chips').replaceChildren(...wanted.map(chip),
+    h('button', { type: 'button', class: 'chip', onclick: () => openSettings(), 'aria-label': 'All settings', text: '⚙ Settings' }));
+  $$('#chips .chip').forEach((c) => { c.disabled = app.running; });
 }
 
 let estTimer;
@@ -381,9 +393,18 @@ function showSheet(id) { const s = $(id); s.hidden = false; s.dataset.prevFocus 
 function hideSheet(id) { const s = $(id); s.hidden = true; s._prev?.focus?.(); }
 
 function openSettings(focus) {
-  const body = buildSettings(app.boot, S, { focus, display, onDisplay: applyDisplay, onChange: () => { persist(); paintChips(); scheduleEstimate(); } });
+  const body = buildSettings(app.boot, S, {
+    focus, prefs, onChange: () => { persist(); paintChips(); scheduleEstimate(); },
+    actions: {
+      balance: () => app.available, showPlans: () => { hideSheet('#settings'); account.showPlans(); },
+      showMemory: () => { hideSheet('#settings'); account.showMemory(); }, showActivity: () => { hideSheet('#settings'); account.showActivity(); },
+      openFiles: () => { hideSheet('#settings'); openFilesPanel(); files.refresh(null); }, deleteFiles: () => { hideSheet('#settings'); deleteAllFiles(); },
+      saveAutoSpend: (v) => api('/api/settings', { method: 'PUT', body: { auto_spend: v } }).then(scheduleEstimate).catch(() => toast('Could not save that.')),
+    },
+  });
   $('#settings-body').replaceChildren(body);
   $('#settings .sheet-card').classList.add('settings-card');
+  $('#settings-title').textContent = 'Settings';
   showSheet('#settings');
 }
 
@@ -423,17 +444,8 @@ async function showCredits() {
 // ------------------------------------------------------------------ panels
 function closeSide() { delete $('#app').dataset.side; $('#scrim').hidden = true; }
 function openFilesPanel() { layout.openFiles(); }
-function openFilesPanelSoft() { if (!matchMedia('(max-width: 1100px)').matches) openFilesPanel(); }
+function openFilesPanelSoft() { if (prefs.get().workspace_auto && !matchMedia('(max-width: 1100px)').matches) openFilesPanel(); }
 function closeFilesPanel() { layout.closeFiles(); }
-
-function applyDisplay() {
-  const r = document.documentElement;
-  r.dataset.anim = display.anim; r.dataset.size = display.size; r.dataset.density = display.density;
-  r.classList.toggle('no-timing', !display.timing); r.classList.toggle('no-thinking', !display.thinking);
-  const c = ACCENTS[display.accent] || ACCENTS.teal;
-  r.style.setProperty('--accent-user', c);
-  store.set('sh.display', display);
-}
 
 async function showDetails(taskId) {
   let rows = [];
@@ -449,13 +461,22 @@ async function showDetails(taskId) {
   $('#dialog .sheet-card').classList.add('wide');
 }
 
-function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; }
+
+function deleteAllFiles() {
+  dialog('Delete all my files?', h('p', { text: 'This removes every file the assistant made for you, and your uploads. It cannot be undone.' }),
+  h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn danger', text: 'Delete everything', onclick: async () => { await api('/api/workspace', { method: 'DELETE' }); hideSheet('#dialog'); files.refresh(app.convId); $('#preview').hidden = true; toast('Files deleted.'); } }),
+    h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: () => hideSheet('#dialog') })));
+}
 
 // ------------------------------------------------------------------ wiring
 function wireStatic() {
   $('#composer').addEventListener('submit', (e) => { e.preventDefault(); send(); });
   input.addEventListener('input', () => { autoGrow(); scheduleEstimate(); });
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    const plain = !e.shiftKey && !e.ctrlKey && !e.metaKey;
+    if (prefs.get().send_on_enter ? plain : (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+  });
   $('#stop-btn').addEventListener('click', stopRun);
   $('#new-chat').addEventListener('click', () => { closeSide(); newChat(); });
   $('#open-side').addEventListener('click', () => { $('#app').dataset.side = 'open'; $('#scrim').hidden = false; });
@@ -484,17 +505,15 @@ function wireStatic() {
   $('#credit-pill').addEventListener('click', () => account.showPlans());
   $('#wallet').addEventListener('dblclick', showCredits);
   $('#theme-toggle').addEventListener('click', () => {
-    const dark = (document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
-    const next = dark ? 'light' : 'dark'; applyTheme(next); store.set('sh.theme', next);
+    const dark = document.documentElement.dataset.dark === '1';
+    prefs.set({ theme: dark ? 'light' : 'dark' });
   });
   $('#dev-plan').addEventListener('change', async (e) => {
     await api('/api/dev/plan', { method: 'POST', body: { plan: e.target.value } });
     app.boot = await api('/api/bootstrap'); sanitizeSettings(); persist(); paintPlan(); paintWallet(app.boot.wallet); paintChips(); scheduleEstimate(); toast(`Now testing as the ${e.target.value} plan.`);
   });
   $('#dev-topup').addEventListener('click', async () => { await api('/api/dev/topup', { method: 'POST', body: { credits: 500 } }); refreshWallet(); toast('Added 500 credits.'); });
-  $('#delete-files').addEventListener('click', () => dialog('Delete all my files?', h('p', { text: 'This removes every file the assistant made for you, and your uploads. It cannot be undone.' }),
-    h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn danger', text: 'Delete everything', onclick: async () => { await api('/api/workspace', { method: 'DELETE' }); hideSheet('#dialog'); files.refresh(app.convId); $('#preview').hidden = true; toast('Files deleted.'); } }),
-      h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: () => hideSheet('#dialog') }))));
+  $('#delete-files').addEventListener('click', deleteAllFiles);
   $('#file-input').addEventListener('change', async (e) => {
     const f = e.target.files[0]; e.target.value = '';
     if (!f) return;

@@ -39,19 +39,22 @@ const ok = []; const check = (n, v, x = '') => { ok.push(v); console.log(`${v ? 
   // owner: everything open
   check('owner badge and every mode unlocked', (await p.locator('#plan-badge').innerText()).toLowerCase() === 'owner');
   await p.click('#chips .chip:has-text("Mode")'); await p.waitForSelector('#settings:not([hidden])');
-  check('settings has 8 tabs, each with a short summary', (await p.locator('.tab-btn').count()) === 8 && (await p.locator('.tab-btn .tab-sum').count()) >= 7);
+  const groups = await p.locator('.tab-btn b').allInnerTexts();
+  check('settings has the six plan groups plus Look and layout, each with a summary',
+    JSON.stringify(groups) === JSON.stringify(['Models', 'Team', 'Tools and skills', 'Files', 'Credits', 'Privacy', 'Look and layout']) && (await p.locator('.tab-btn .tab-sum').count()) === 7, groups.join(', '));
+  check('money settings sit apart from model settings', (await p.locator('.tab-pane input[aria-label^="Most credits"]').count()) === 0);
   check('no mode shows a lock for the owner', (await p.locator('.mode-opt .lock').count()) === 0);
   await p.click('.mode-opt:has-text("Council")');
-  await p.click('#tab-brains-btn');
+  await p.locator('.tab-pane details.adv > summary:has-text("Advanced")').click();
   await p.click('[aria-label="Quick pick"] button:has-text("Strongest")');
   const picked = await p.evaluate(() => JSON.parse(localStorage.getItem('sh.settings')).brains);
   check('Brains: one tap sets every job', Object.keys(picked).length >= 2, JSON.stringify(Object.keys(picked)));
-  for (const t of ['planning', 'research', 'build', 'limits', 'tools', 'display']) { await p.click(`#tab-${t}-btn`); }
-  check('every tab opens its own page', await p.locator('#tab-display-btn[aria-selected="true"]').count() === 1 && /Display/.test(await p.locator('.tab-pane h3').first().innerText()));
-  await p.click('#tab-limits-btn');
+  for (const t of ['team', 'tools', 'files', 'credits', 'privacy', 'look']) { await p.click(`#tab-${t}-btn`); }
+  check('every group opens its own page', await p.locator('#tab-look-btn[aria-selected="true"]').count() === 1 && /Look and layout/.test(await p.locator('.tab-pane h3').first().innerText()));
+  await p.click('#tab-models-btn');
   check('Max effort is available to the owner', !(await p.locator('[aria-label="Effort"] button:has-text("Max")').isDisabled()));
   await p.click('#settings-close');
-  check('chips mention the choices', /Custom/.test(await p.locator('#chips').innerText()) && /Council/.test(await p.locator('#chips').innerText()));
+  check('the three chips show the choices', /Mode: Council/.test(await p.locator('#chips').innerText()) && (await p.locator('#chips .chip').count()) === 4);
 
   // a real run in a mode that is Pro-only on normal plans
   await p.fill('#composer-text', 'explain gravity'); await p.click('#send-btn');
@@ -73,8 +76,8 @@ const ok = []; const check = (n, v, x = '') => { ok.push(v); console.log(`${v ? 
   check('phone: no sideways scroll', await m.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await m.click('.chip:has-text("Settings")'); await m.waitForSelector('#settings:not([hidden])');
   check('phone: tabs become a scrolling strip, content fits', await m.evaluate(() => { const r = document.querySelector('.tab-rail'); const l = document.querySelector('.settings-layout'); return getComputedStyle(r).flexDirection === 'row' && l.scrollWidth <= l.clientWidth + 1; }));
-  await m.click('#tab-planning-btn');
-  check('phone: planning page fits the screen', await m.evaluate(() => { const l = document.querySelector('.tab-pane'); return l.scrollWidth <= l.clientWidth + 1; }));
+  await m.click('#tab-team-btn');
+  check('phone: the team page fits the screen', await m.evaluate(() => { const l = document.querySelector('.tab-pane'); return l.scrollWidth <= l.clientWidth + 1; }));
   await m.screenshot({ path: '/tmp/claude-0/shots/46-phone-tabs.png' });
 
   check('no browser errors', errors.length === 0, errors.slice(0, 3).join(' | '));

@@ -32,10 +32,11 @@ automatically approved. Keep the token in secure settings and out of command his
 
 ```bash
 python -m pytest                        # backend unit/integration tests, no network, no cost
-bash scripts/ui_all.sh                  # all 5 browser suites, each on its own fresh demo server
+bash scripts/ui_all.sh                  # all 6 browser suites, each on its own fresh demo server
 python backend/tests/demo_server.py     # the real app on port 8765, backed by the fake OpenRouter
 node scripts/ui_check.cjs               # 21 checks in a real browser against that server
 node scripts/docs_ui_check.cjs          # documents, decks, pictures, the reader and answer length
+node scripts/look_ui_check.cjs          # the three chips, settings groups, looks, themes, saved look, folds, file cards
 node scripts/team_ui_check.cjs          # team controls, edited approval, reload and reconnect
 node scripts/chart_regression.cjs       # isolated browser regressions for extreme chart ranges
 python scripts/live_test.py --quick     # REAL OpenRouter: key check, model sync, one call, cost check
@@ -144,13 +145,25 @@ Run `python -m pytest` (192 tests), then `python backend/tests/demo_server.py` a
 - **Side panels:** drag the edge of the sidebar or the workspace with the mouse to resize (double-click resets,
   arrow keys work too). Drag the sidebar far left, or click «, to shrink it to icons. Sizes are remembered.
 - **Workspace:** the "Workspace" button in the top bar opens it, and its ✕ closes it. It opens by itself when the AI makes a file.
-- **Settings** is a tabbed panel: Mode, Brains (with a quick pick: Auto, Cheapest, Balanced, Strongest), Planning,
-  Research, Build and check, Effort and limits, Tools and skills, Display. The chips above the message box open the matching tab.
+- **Three chips, one sheet.** Above the message box there are three chips: Mode, Team and Tools (plan section 14), and
+  a Settings button. Each chip opens its own group in the Settings sheet. The estimate sits under the box.
+- **Settings groups:** Models, Team, Tools and skills, Files, Credits, Privacy, and Look and layout. Each group shows the
+  few basic controls first and keeps the rest in a closed **Advanced** fold. Money (Credits) never sits next to model settings.
+  Models has the plan's three optional slots (understanding, prompt enhancer, main) behind one "Use the default models" switch,
+  and an "Answer style" choice: Direct answers (default) or Teach me like a tutor.
+- **Look and layout is fully yours.** Start from a look (Calm, Focus, Paper, Compact, Big and clear), then change anything:
+  six themes (device, light, dark, paper, midnight, high contrast), an accent color (six swatches or any color), text size
+  (85 to 140%), font, spacing, chat width, corner style, motion, which chips show above the message box, which sidebar
+  shortcuts show, how the steps panel behaves, and whether very long answers fold. Changes show at once and are saved in the
+  browser and on the account (`users.ui_prefs`, checked by `backend/app/uiprefs.py`), so the same look follows the user to
+  a new device.
+- **Chat parts.** Long answers fold after about 30 lines with Show more. A finished run folds to one line such as
+  "8 steps, 41 credits". Several files from one answer group into one "Files (3)" card with type, size, version, Open and Download.
 - **Owner mode:** `UNLOCK_ALL=1` in `.env` gives every visitor the hidden Owner plan (all modes, brains, max effort,
   100,000 credits). Good while you are the only user. Set it to 0 before real users arrive.
 
-Browser checks: `bash scripts/ui_all.sh` runs all five (21 + 23 + 15 + 24 + 18 = 101 checks). Unit tests:
-`python -m pytest` (219).
+Browser checks: `bash scripts/ui_all.sh` runs all six suites (21 + 23 + 15 + 25 + 17 + 30 = 131 checks). Unit tests:
+`python -m pytest` (231).
 
 ## Documents, decks, pictures and answer length
 
